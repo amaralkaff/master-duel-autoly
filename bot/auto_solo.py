@@ -290,6 +290,7 @@ class AutoSolo:
             if not self.frida.is_duel_active():
                 break
             self.frida.advance_duel_end()
+            self.frida.dismiss_all_dialogs()
             self._sleep(0.3)
             elapsed += 0.3
 
@@ -301,6 +302,7 @@ class AutoSolo:
         while elapsed < timeout and not self._stopped():
             if self.frida.is_duel_active():
                 return True
+            self.frida.dismiss_all_dialogs()
             self._sleep(0.5)
             elapsed += 0.5
         return False
@@ -312,6 +314,7 @@ class AutoSolo:
             if not self.frida.is_duel_active():
                 logger.info("Duel engine inactive.")
                 return True
+            self.frida.dismiss_all_dialogs()
             self._sleep(0.5)
             elapsed += 0.5
         return False
