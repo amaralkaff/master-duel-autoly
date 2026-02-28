@@ -1,0 +1,6 @@
+pymem>=1.13
+pywin32>=306
+keyboard>=0.13
+colorama>=0.4
+rich>=13.0
+frida>=17.0
