@@ -198,15 +198,15 @@ class AutoSolo:
             self._sleep(0.3)
             return "skipped"
 
-        # Step 2: Probe chapter type
+        # Step 2: Try server-side completion to detect chapter type
         self.state.auto_solo_status = f"Probing({chapter_id})..."
         is_duel = self._probe_chapter_type(chapter_id, gate)
 
         if not is_duel:
-            # Not a duel chapter — try Solo_skip again
+            # Not a duel chapter — try Solo_skip again (may work after Solo_start)
             skip2 = self.frida.call_api_with_result("Solo_skip", chapter_id)
             if skip2 and skip2.get("code") == 0:
-                logger.info(f"Chapter {chapter_id} completed via skip")
+                logger.info(f"Chapter {chapter_id} completed via Solo_start+skip")
                 self._sleep(0.3)
                 return "skipped"
             logger.info(f"Chapter {chapter_id} is not a duel, can't skip — skipping")
@@ -222,9 +222,8 @@ class AutoSolo:
         # Wait for the duel engine to become active
         self.state.auto_solo_status = f"Waiting for duel ({chapter_id})..."
         if not self._wait_for_duel(timeout=15.0):
-            logger.warn(f"Duel didn't start for {chapter_id} — treating as done")
-            self.frida.clean_vc_stack()
-            return "skipped"
+            logger.warn(f"Duel didn't start for chapter {chapter_id}")
+            return "failed"
 
         # Wait for LP to initialize, then instant-win
         self._sleep(2.0)
@@ -291,7 +290,6 @@ class AutoSolo:
             if not self.frida.is_duel_active():
                 break
             self.frida.advance_duel_end()
-            self.frida.dismiss_all_dialogs()
             self._sleep(0.3)
             elapsed += 0.3
 
@@ -303,7 +301,6 @@ class AutoSolo:
         while elapsed < timeout and not self._stopped():
             if self.frida.is_duel_active():
                 return True
-            self.frida.dismiss_all_dialogs()
             self._sleep(0.5)
             elapsed += 0.5
         return False
@@ -315,7 +312,6 @@ class AutoSolo:
             if not self.frida.is_duel_active():
                 logger.info("Duel engine inactive.")
                 return True
-            self.frida.dismiss_all_dialogs()
             self._sleep(0.5)
             elapsed += 0.5
         return False

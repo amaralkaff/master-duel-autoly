@@ -239,6 +239,7 @@ class FridaIL2CPP:
                 actions = result.get("actions", [])
                 logger.info(f"Dismissed: {actions}")
                 return True
+            logger.debug(f"dismissAllDialogs: {result.get('error', 'nothing to dismiss')}")
             return False
         except Exception as exc:
             logger.error(f"dismissAllDialogs RPC failed: {exc}")

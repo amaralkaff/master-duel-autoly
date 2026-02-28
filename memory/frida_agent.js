@@ -1558,29 +1558,24 @@ rpc.exports = {
                 if (dvcmClass) {
                     var dvcmGetMgr = findMethodByName(dvcmClass, "GetManager", 0);
                     var dvcmOnBack = findMethodByName(dvcmClass, "OnBack", 0);
-                    var baseVcm = findClassByName("YgomSystem.UI", "ViewControllerManager");
-                    var getCount = baseVcm ? findMethodByName(baseVcm, "GetStackCount", 0) : null;
                     if (dvcmGetMgr && dvcmOnBack) {
                         var dvcm = invokeStatic(dvcmGetMgr, []);
                         if (dvcm && !dvcm.isNull()) {
-                            // Check stack count first — skip if no dialogs
-                            var count = 0;
-                            if (getCount) {
-                                try { count = invokeInstance(getCount, dvcm, []).toInt32(); } catch (e) {}
-                            }
-                            if (count > 0) {
-                                for (var i = 0; i < count; i++) {
-                                    try {
-                                        invokeInstance(dvcmOnBack, dvcm, []);
-                                        actions.push("DialogVCM.OnBack");
-                                    } catch (e) { break; }
-                                }
-                                send("dismissAllDialogs: " + JSON.stringify(actions));
+                            // Call OnBack multiple times to dismiss stacked dialogs
+                            for (var i = 0; i < 5; i++) {
+                                try {
+                                    invokeInstance(dvcmOnBack, dvcm, []);
+                                    actions.push("DialogVCM.OnBack");
+                                } catch (e) { break; }
                             }
                         }
                     }
                 }
 
+                // 2. Content VCs (stuck SSPVs etc.) are handled by cleanVcStack — not here
+                // This avoids destroying gameObjects that are still referenced in viewStack
+
+                send("dismissAllDialogs: " + JSON.stringify(actions));
                 return { success: actions.length > 0, actions: actions };
             });
             return result;
