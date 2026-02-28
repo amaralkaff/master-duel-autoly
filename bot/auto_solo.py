@@ -187,7 +187,7 @@ class AutoSolo:
         if gate != self._current_gate:
             logger.info(f"Switching to gate {gate}...")
             self.frida.call_solo_api_fire_and_forget("Solo_gate_entry", gate)
-            self._sleep(1.0)
+            self._sleep(2.0)
             self._current_gate = gate
 
         # Step 1: Try Solo_skip (already completed chapters)
@@ -198,21 +198,26 @@ class AutoSolo:
             self._sleep(0.3)
             return "skipped"
 
-        # Step 2: Try server-side completion to detect chapter type
+        # Step 2: Probe chapter type
         self.state.auto_solo_status = f"Probing({chapter_id})..."
         is_duel = self._probe_chapter_type(chapter_id, gate)
 
         if not is_duel:
-            # Not a duel chapter — try Solo_skip again (may work after Solo_start)
+            # Not a duel chapter — try Solo_skip again
             skip2 = self.frida.call_api_with_result("Solo_skip", chapter_id)
             if skip2 and skip2.get("code") == 0:
-                logger.info(f"Chapter {chapter_id} completed via Solo_start+skip")
+                logger.info(f"Chapter {chapter_id} completed via skip")
                 self._sleep(0.3)
                 return "skipped"
             logger.info(f"Chapter {chapter_id} is not a duel, can't skip — skipping")
             return "skipped"
 
-        # Step 3: Confirmed duel chapter — use RetryDuel + instant win
+        # Step 3: Initialize chapter server-side before RetryDuel
+        self.state.auto_solo_status = f"Solo_start({chapter_id})..."
+        self.frida.call_solo_api_fire_and_forget("Solo_start", chapter_id)
+        self._sleep(1.0)
+
+        # Step 4: Confirmed duel chapter — use RetryDuel + instant win
         self.state.auto_solo_status = f"RetryDuel({chapter_id})..."
         retry_ok = self.frida.retry_solo_duel(chapter_id, is_rental=True)
         if not retry_ok:
