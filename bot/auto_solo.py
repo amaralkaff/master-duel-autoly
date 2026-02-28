@@ -222,8 +222,9 @@ class AutoSolo:
         # Wait for the duel engine to become active
         self.state.auto_solo_status = f"Waiting for duel ({chapter_id})..."
         if not self._wait_for_duel(timeout=15.0):
-            logger.warn(f"Duel didn't start for chapter {chapter_id}")
-            return "failed"
+            logger.warn(f"Duel didn't start for {chapter_id} — treating as done")
+            self.frida.clean_vc_stack()
+            return "skipped"
 
         # Wait for LP to initialize, then instant-win
         self._sleep(2.0)
