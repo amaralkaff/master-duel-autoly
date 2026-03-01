@@ -12,13 +12,11 @@ from config import (
     WINDOW_TITLE,
     STOP_HOTKEY,
     HOTKEY_INSTANT_WIN,
-    HOTKEY_AUTO_SOLO,
     HOTKEY_WIN_NOW,
     SCAN_INTERVAL,
 )
 from memory.frida_il2cpp import FridaIL2CPP
 from window.background_input import find_window
-from bot.auto_solo import AutoSolo
 from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
 from ui.dashboard import Dashboard
@@ -82,28 +80,10 @@ def main() -> None:
         sys.exit(1)
     logger.ok("Frida IL2CPP session ready.")
 
-    # -- Auto-solo setup --
-    auto_solo = AutoSolo(frida_session, state, hwnd=hwnd)
-    auto_solo_thread = None
-
     # -- Register hotkeys --
     def on_toggle_iw():
         new = state.toggle_instant_win()
         logger.info(f"Instant Win: {'ON' if new else 'OFF'}")
-
-    def on_toggle_auto_solo():
-        nonlocal auto_solo_thread
-        enabled = state.toggle_auto_solo()
-        if enabled:
-            auto_solo.reset()
-            auto_solo_thread = threading.Thread(
-                target=auto_solo.run, daemon=True
-            )
-            auto_solo_thread.start()
-            logger.info("Auto Solo: ON")
-        else:
-            auto_solo.stop()
-            logger.info("Auto Solo: OFF")
 
     def on_win_now():
         logger.info("One-shot instant win triggered!")
@@ -115,10 +95,8 @@ def main() -> None:
     def on_quit():
         logger.warn(f"{STOP_HOTKEY} pressed -- shutting down...")
         state.stop_event.set()
-        auto_solo.stop()
 
     keyboard.add_hotkey(HOTKEY_INSTANT_WIN, on_toggle_iw, suppress=True)
-    keyboard.add_hotkey(HOTKEY_AUTO_SOLO, on_toggle_auto_solo, suppress=True)
     keyboard.add_hotkey(HOTKEY_WIN_NOW, on_win_now, suppress=True)
     keyboard.add_hotkey(STOP_HOTKEY, on_quit, suppress=True)
 
@@ -128,7 +106,7 @@ def main() -> None:
 
     # -- Start dashboard (blocks main thread) --
     dashboard = Dashboard(frida_session, hwnd, state, log_buf)
-    logger.ok("Dashboard running. Press F1/F2/F5/F12.")
+    logger.ok("Dashboard running. Press F1/F5/F12.")
 
     try:
         dashboard.run()
@@ -136,11 +114,7 @@ def main() -> None:
         state.stop_event.set()
     finally:
         state.stop_event.set()
-        auto_solo.stop()
-        frida_session.set_time_scale(1.0)  # restore normal speed
         worker.join(timeout=3.0)
-        if auto_solo_thread:
-            auto_solo_thread.join(timeout=3.0)
         frida_session.detach()
         keyboard.unhook_all()
         print("\nBot stopped. Goodbye!")

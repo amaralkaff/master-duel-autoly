@@ -9,7 +9,7 @@ from rich.text import Text
 from memory.frida_il2cpp import FridaIL2CPP
 from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
-from config import TUI_REFRESH_RATE, HOTKEY_INSTANT_WIN, HOTKEY_WIN_NOW, HOTKEY_AUTO_SOLO, STOP_HOTKEY
+from config import TUI_REFRESH_RATE, HOTKEY_INSTANT_WIN, HOTKEY_WIN_NOW, STOP_HOTKEY
 
 
 class Dashboard:
@@ -72,35 +72,9 @@ class Dashboard:
             f"  \\[{HOTKEY_INSTANT_WIN}] Instant Win:  {iw_label}\n"
         ))
 
-        # -- Auto Solo section --
-        lines.append_text(Text.from_markup("\n  [bold]-- Auto Solo --[/bold]\n"))
-        as_enabled = self.state.auto_solo_enabled
-        as_label = "[green]ON[/]" if as_enabled else "[red]OFF[/]"
-        lines.append_text(Text.from_markup(
-            f"  \\[{HOTKEY_AUTO_SOLO}] Auto Solo:  {as_label}\n"
-        ))
-
-        done = self.state.auto_solo_done
-        total = self.state.auto_solo_total
-        progress = f"{done}/{total}" if total > 0 else "--"
-        lines.append_text(Text.from_markup(
-            f"  Progress: {progress}  "
-            f"Won: {self.state.auto_solo_duels_won}  "
-            f"Skip: {self.state.auto_solo_skipped}  "
-            f"Fail: {self.state.auto_solo_duels_failed}\n"
-        ))
-
-        lines.append_text(Text.from_markup(
-            f"  Chapter: {self.state.auto_solo_chapter_id}\n"
-        ))
-        lines.append_text(Text.from_markup(
-            f"  Status: {_markup_safe(self.state.auto_solo_status)}\n"
-        ))
-
         # -- Controls section --
         lines.append_text(Text.from_markup("\n  [bold]-- Controls --[/bold]\n"))
         lines.append_text(Text.from_markup(f"  {HOTKEY_INSTANT_WIN}   Toggle instant win\n"))
-        lines.append_text(Text.from_markup(f"  {HOTKEY_AUTO_SOLO}   Toggle auto solo\n"))
         lines.append_text(Text.from_markup(f"  {HOTKEY_WIN_NOW}   Instant win NOW (one-shot)\n"))
         lines.append_text(Text.from_markup(f"  {STOP_HOTKEY}  Quit\n"))
 
