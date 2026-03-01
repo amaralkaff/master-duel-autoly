@@ -8,12 +8,17 @@ instant-win by writing 0 to the opponent's LP.
 from __future__ import annotations
 
 import os
+import sys
 import frida
 
 from utils import logger
 from config import PROCESS_NAME
 
-_AGENT_PATH = os.path.join(os.path.dirname(__file__), "frida_agent.js")
+# When bundled by PyInstaller, data files live under sys._MEIPASS
+if getattr(sys, "frozen", False):
+    _AGENT_PATH = os.path.join(sys._MEIPASS, "memory", "frida_agent.js")
+else:
+    _AGENT_PATH = os.path.join(os.path.dirname(__file__), "frida_agent.js")
 
 
 class FridaIL2CPP:

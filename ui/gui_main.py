@@ -12,7 +12,7 @@ from bot.gemini_advisor import GeminiAdvisor
 from memory.frida_il2cpp import FridaIL2CPP
 from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, SettingsDialog
 from utils import logger
 
 
@@ -52,8 +52,8 @@ def run_gui(
         logger.info(f"Reveal Cards: {'ON' if checked else 'OFF'}")
 
     def _assist() -> None:
-        if not advisor:
-            win.append_ai_advice("No advisor configured. Set GEMINI_API_KEY in .env file.", "system")
+        if not advisor or not advisor.has_client:
+            win.append_ai_advice("No API key configured. Click the gear icon to add your Gemini API key.", "system")
             return
         if not frida_session.is_attached() or not frida_session.is_duel_active():
             win.append_ai_advice("No active duel detected.", "system")
@@ -78,10 +78,16 @@ def run_gui(
                     win._ai_messages.pop()
                 win.append_ai_advice(f"Error: {exc}", "system")
             finally:
-                win.lbl_ai_status.setText("Gemini 3 Flash")
-                win.lbl_ai_status.setStyleSheet("color: #6c7086; font-size: 10px; background: transparent;")
+                _update_ai_status()
 
         threading.Thread(target=_query, daemon=True).start()
+
+    def _toggle_speed(checked: bool) -> None:
+        if state.speed_hack_enabled != checked:
+            state.toggle_speed_hack()
+        scale = 3.0 if checked else 1.0
+        frida_session.set_time_scale(scale)
+        logger.info(f"Speed Hack: {'ON (3x)' if checked else 'OFF (1x)'}")
 
     def _win_now() -> None:
         logger.info("One-shot instant win triggered!")
@@ -90,11 +96,28 @@ def run_gui(
         except Exception as exc:
             logger.error(f"One-shot failed: {exc}")
 
+    def _update_ai_status() -> None:
+        if advisor and advisor.has_client:
+            win.lbl_ai_status.setText(advisor.model)
+            win.lbl_ai_status.setStyleSheet("color: #6c7086; font-size: 10px; background: transparent;")
+        else:
+            win.lbl_ai_status.setText("Not configured")
+            win.lbl_ai_status.setStyleSheet("color: #f38ba8; font-size: 10px; background: transparent;")
+
+    def _open_settings() -> None:
+        dlg = SettingsDialog(win, advisor)
+        dlg.exec()
+        _update_ai_status()
+
+    _update_ai_status()
+
     win.btn_autopilot.toggled.connect(_toggle_autopilot)
     win.btn_instant_win.toggled.connect(_toggle_instant_win)
     win.btn_reveal.toggled.connect(_toggle_reveal)
+    win.btn_speed.toggled.connect(_toggle_speed)
     win.btn_assist.clicked.connect(_assist)
     win.btn_win_now.clicked.connect(_win_now)
+    win.btn_settings.clicked.connect(_open_settings)
 
     # Register assist callback so F4 hotkey can trigger it
     if assist_cb_ref is not None:

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import collections
+import os
 import re
+import sys
 from datetime import datetime
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QPushButton,
@@ -45,6 +49,201 @@ QPushButton:checked { background: #a6e3a1; color: #1e1e2e; }
 QLabel { font-size: 13px; }
 QSplitter::handle { background: #45475a; width: 2px; }
 """
+
+
+def _env_path() -> str:
+    """Return the .env file path (next to exe when frozen, else project root)."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), ".env")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+
+
+class SettingsDialog(QDialog):
+    """Settings dialog for configuring the Gemini API key and model."""
+
+    def __init__(self, parent=None, advisor=None) -> None:
+        super().__init__(parent)
+        self._advisor = advisor
+        self.setWindowTitle("Settings")
+        self.setFixedSize(420, 280)
+        self.setStyleSheet(
+            "QDialog { background: #1e1e2e; color: #cdd6f4; }"
+            "QLabel { color: #cdd6f4; font-size: 13px; }"
+            "QLineEdit { background: #181825; border: 1px solid #45475a; border-radius: 4px; "
+            "  color: #cdd6f4; padding: 6px 8px; font-size: 13px; }"
+            "QLineEdit:focus { border: 1px solid #89b4fa; }"
+            "QComboBox { background: #181825; border: 1px solid #45475a; border-radius: 4px; "
+            "  color: #cdd6f4; padding: 5px 8px; font-size: 12px; }"
+            "QComboBox:focus { border: 1px solid #89b4fa; }"
+            "QComboBox::drop-down { border: none; width: 20px; }"
+            "QComboBox::down-arrow { image: none; border-left: 4px solid transparent; "
+            "  border-right: 4px solid transparent; border-top: 5px solid #cdd6f4; }"
+            "QComboBox QAbstractItemView { background: #181825; color: #cdd6f4; "
+            "  border: 1px solid #45475a; selection-background-color: #313244; }"
+            "QPushButton { background: #313244; border: 1px solid #45475a; border-radius: 4px; "
+            "  padding: 6px 16px; font-weight: bold; color: #cdd6f4; }"
+            "QPushButton:hover { background: #45475a; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        # -- API Key --
+        layout.addWidget(QLabel("Gemini API Key"))
+        key_row = QHBoxLayout()
+        self._key_input = QLineEdit()
+        self._key_input.setEchoMode(QLineEdit.Password)
+        self._existing_key = os.environ.get("GEMINI_API_KEY", "")
+        if self._existing_key:
+            self._key_input.setPlaceholderText("Key saved -- enter new key to change")
+        else:
+            self._key_input.setPlaceholderText("Paste your Gemini API key here...")
+        key_row.addWidget(self._key_input)
+        self._btn_toggle = QPushButton("Show")
+        self._btn_toggle.setFixedWidth(52)
+        self._btn_toggle.clicked.connect(self._toggle_visibility)
+        key_row.addWidget(self._btn_toggle)
+        layout.addLayout(key_row)
+
+        # -- Model selector --
+        layout.addWidget(QLabel("Model"))
+        model_row = QHBoxLayout()
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        current_model = advisor.model if advisor else os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+        self._model_combo.addItem(current_model)
+        self._model_combo.setCurrentText(current_model)
+        model_row.addWidget(self._model_combo)
+        self._btn_fetch = QPushButton("Fetch")
+        self._btn_fetch.setFixedWidth(60)
+        self._btn_fetch.setToolTip("Fetch available models from Gemini API")
+        self._btn_fetch.clicked.connect(self._fetch_models)
+        model_row.addWidget(self._btn_fetch)
+        layout.addLayout(model_row)
+
+        # -- Status --
+        self._lbl_status = QLabel()
+        self._update_status()
+        layout.addWidget(self._lbl_status)
+
+        layout.addStretch()
+
+        # -- Buttons --
+        btn_row = QHBoxLayout()
+        btn_clear = QPushButton("Clear")
+        btn_clear.clicked.connect(self._clear_key)
+        btn_row.addWidget(btn_clear)
+        btn_row.addStretch()
+        btn_save = QPushButton("Save")
+        btn_save.setStyleSheet(
+            "QPushButton { background: #89b4fa; color: #1e1e2e; border: none; "
+            "border-radius: 4px; padding: 6px 24px; font-weight: bold; }"
+            "QPushButton:hover { background: #74c7ec; }"
+        )
+        btn_save.clicked.connect(self._save)
+        btn_row.addWidget(btn_save)
+        layout.addLayout(btn_row)
+
+    def _toggle_visibility(self) -> None:
+        if self._key_input.echoMode() == QLineEdit.Password:
+            self._key_input.setEchoMode(QLineEdit.Normal)
+            self._btn_toggle.setText("Hide")
+        else:
+            self._key_input.setEchoMode(QLineEdit.Password)
+            self._btn_toggle.setText("Show")
+
+    def _update_status(self) -> None:
+        has = self._advisor and self._advisor.has_client
+        if has:
+            self._lbl_status.setText("Status: Configured")
+            self._lbl_status.setStyleSheet("color: #a6e3a1; font-size: 12px;")
+        else:
+            self._lbl_status.setText("Status: Not configured")
+            self._lbl_status.setStyleSheet("color: #f38ba8; font-size: 12px;")
+
+    def _fetch_models(self) -> None:
+        """Fetch available models from the Gemini API and populate the dropdown."""
+        if not self._advisor or not self._advisor.has_client:
+            # Try initializing with the current key field first
+            key = self._key_input.text().strip() or self._existing_key
+            if key and self._advisor:
+                self._advisor.set_api_key(key)
+            if not self._advisor or not self._advisor.has_client:
+                self._lbl_status.setText("Status: Enter API key first")
+                self._lbl_status.setStyleSheet("color: #f9e2af; font-size: 12px;")
+                return
+
+        self._btn_fetch.setEnabled(False)
+        self._btn_fetch.setText("...")
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        models = self._advisor.list_models()
+        self._btn_fetch.setEnabled(True)
+        self._btn_fetch.setText("Fetch")
+
+        if not models:
+            self._lbl_status.setText("Status: Could not fetch models")
+            self._lbl_status.setStyleSheet("color: #f38ba8; font-size: 12px;")
+            return
+
+        current = self._model_combo.currentText()
+        self._model_combo.clear()
+        self._model_combo.addItems(models)
+        # Re-select the previously chosen model if it exists
+        idx = self._model_combo.findText(current)
+        if idx >= 0:
+            self._model_combo.setCurrentIndex(idx)
+        else:
+            self._model_combo.setCurrentText(current)
+
+        self._lbl_status.setText(f"Status: {len(models)} models loaded")
+        self._lbl_status.setStyleSheet("color: #a6e3a1; font-size: 12px;")
+
+    def _save(self) -> None:
+        key = self._key_input.text().strip() or self._existing_key
+        model = self._model_combo.currentText().strip()
+        if not key:
+            return
+        # Write to .env
+        env = _env_path()
+        lines = []
+        if os.path.isfile(env):
+            with open(env, "r", encoding="utf-8") as f:
+                lines = [
+                    l for l in f.readlines()
+                    if not l.startswith("GEMINI_API_KEY=") and not l.startswith("GEMINI_MODEL=")
+                ]
+        lines.append(f"GEMINI_API_KEY={key}\n")
+        if model:
+            lines.append(f"GEMINI_MODEL={model}\n")
+        with open(env, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        # Apply at runtime
+        if self._advisor:
+            self._advisor.set_api_key(key)
+            if model:
+                self._advisor.set_model(model)
+        self._update_status()
+        self.accept()
+
+    def _clear_key(self) -> None:
+        self._key_input.clear()
+        env = _env_path()
+        if os.path.isfile(env):
+            with open(env, "r", encoding="utf-8") as f:
+                lines = [
+                    l for l in f.readlines()
+                    if not l.startswith("GEMINI_API_KEY=") and not l.startswith("GEMINI_MODEL=")
+                ]
+            with open(env, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GEMINI_MODEL", None)
+        if self._advisor:
+            self._advisor.set_api_key("")
+        self._update_status()
 
 
 class MainWindow(QMainWindow):
@@ -140,10 +339,13 @@ class MainWindow(QMainWindow):
         self.btn_reveal = QPushButton("Reveal [F3]")
         self.btn_reveal.setCheckable(True)
         self.btn_win_now = QPushButton("Win Now [F5]")
+        self.btn_speed = QPushButton("Speed [F6]")
+        self.btn_speed.setCheckable(True)
         feat_lay.addWidget(self.btn_autopilot)
         feat_lay.addWidget(self.btn_instant_win)
         feat_lay.addWidget(self.btn_reveal)
         feat_lay.addWidget(self.btn_win_now)
+        feat_lay.addWidget(self.btn_speed)
         left_layout.addWidget(feat_box)
 
         # -- Log viewer --
@@ -196,6 +398,16 @@ class MainWindow(QMainWindow):
         title_col.addWidget(self.lbl_ai_status)
         header_lay.addLayout(title_col)
         header_lay.addStretch()
+
+        self.btn_settings = QPushButton("\u2699")
+        self.btn_settings.setFixedSize(28, 26)
+        self.btn_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_settings.setStyleSheet(
+            "QPushButton { background: #313244; color: #a6adc8; border: 1px solid #45475a; "
+            "border-radius: 4px; font-size: 15px; padding: 0; }"
+            "QPushButton:hover { background: #45475a; }"
+        )
+        header_lay.addWidget(self.btn_settings)
 
         self.btn_clear_ai = QPushButton("Clear")
         self.btn_clear_ai.setFixedSize(52, 26)
@@ -478,6 +690,7 @@ class MainWindow(QMainWindow):
         self.btn_autopilot.setChecked(self.state.autopilot_enabled)
         self.btn_instant_win.setChecked(self.state.instant_win_enabled)
         self.btn_reveal.setChecked(self.state.reveal_enabled)
+        self.btn_speed.setChecked(self.state.speed_hack_enabled)
 
         # Log
         lines = self.log_buf.get_lines()

@@ -11,6 +11,7 @@ class BotState:
     instant_win_enabled: bool = False
     reveal_enabled: bool = False
     autopilot_enabled: bool = False
+    speed_hack_enabled: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -28,3 +29,8 @@ class BotState:
         with self._lock:
             self.autopilot_enabled = not self.autopilot_enabled
             return self.autopilot_enabled
+
+    def toggle_speed_hack(self) -> bool:
+        with self._lock:
+            self.speed_hack_enabled = not self.speed_hack_enabled
+            return self.speed_hack_enabled

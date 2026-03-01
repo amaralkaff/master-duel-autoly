@@ -10,6 +10,8 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+import os
+
 from config import GEMINI_API_KEY, GEMINI_MODEL
 from utils import logger
 
@@ -21,18 +23,10 @@ ACTION_NAMES = {0x08: "Activate", 0x10: "Summon", 0x40: "SetMonster", 0x80: "Set
 PHASE_NAMES = {0: "Draw", 1: "Standby", 2: "Main1", 3: "Battle", 4: "Main2", 5: "End"}
 
 ADVISOR_PROMPT = """\
-You are an expert Yu-Gi-Oh! Master Duel coach. The player is asking for your advice \
-during a live duel. Analyze the board state and give clear, actionable advice.
-
-RULES:
-- Keep your response SHORT (3-5 lines max). The player needs to act fast.
-- Tell the player exactly what to do step by step.
-- Identify the opponent's deck archetype if possible from their cards.
-- Warn about threats (cards that could negate, destroy, or disrupt).
-- Suggest which hand traps to save and when to use them.
-- If it's the player's turn: suggest the optimal play sequence.
-- If it's the opponent's turn: suggest what to negate/chain to.
-- Be direct. No fluff. Example: "1. Summon X  2. Activate Y targeting Z  3. Go to Battle"
+Yu-Gi-Oh! Master Duel coach. Give quick tactical advice.
+Be VERY brief (2-3 lines). Just numbered steps.
+Example: "1. Summon X 2. Activate Y on Z 3. Battle"
+If opponent's turn: what to negate/chain.
 """
 
 
@@ -42,18 +36,60 @@ class GeminiAdvisor:
     def __init__(self) -> None:
         self._client = None
         self._types = None
+        self._model = GEMINI_MODEL
         self._last_call = 0.0
         self._min_interval = 2.0  # min seconds between API calls
         self._init_client()
 
-    def _init_client(self) -> None:
-        if not GEMINI_API_KEY:
+    @property
+    def has_client(self) -> bool:
+        return self._client is not None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def set_api_key(self, key: str) -> bool:
+        """Update the API key at runtime and re-initialize the client."""
+        os.environ["GEMINI_API_KEY"] = key
+        self._client = None
+        self._types = None
+        self._init_client(key or None)
+        return self.has_client
+
+    def set_model(self, model: str) -> None:
+        """Change the model used for queries."""
+        self._model = model
+        os.environ["GEMINI_MODEL"] = model
+        logger.info(f"Gemini model set to: {model}")
+
+    def list_models(self) -> list[str]:
+        """Fetch available generateContent models from the API."""
+        if not self._client:
+            return []
+        try:
+            models = []
+            for m in self._client.models.list():
+                if any(a == "generateContent" for a in (m.supported_actions or [])):
+                    # Strip "models/" prefix if present
+                    name = m.name
+                    if name.startswith("models/"):
+                        name = name[7:]
+                    models.append(name)
+            return sorted(models)
+        except Exception as e:
+            logger.error(f"Failed to list models: {e}")
+            return []
+
+    def _init_client(self, api_key: str | None = None) -> None:
+        key = api_key if api_key is not None else GEMINI_API_KEY
+        if not key:
             logger.warn("Gemini: no API key configured (set GEMINI_API_KEY in .env)")
             return
         try:
             from google import genai
             from google.genai import types
-            self._client = genai.Client(api_key=GEMINI_API_KEY)
+            self._client = genai.Client(api_key=key)
             self._types = types
             logger.ok("Gemini advisor ready")
         except Exception as e:
@@ -84,22 +120,21 @@ class GeminiAdvisor:
         phase_name = PHASE_NAMES.get(phase, str(phase))
 
         prompt = (
-            f"BOARD STATE:\n{json.dumps(board, indent=2)}\n\n"
-            f"CURRENT PHASE: {phase_name}\n"
-            f"MY TURN: {my_turn}\n\n"
-            f"AVAILABLE COMMANDS:\n{cmd_list}\n\n"
-            "What should I do? Give me a short, step-by-step game plan."
+            f"{json.dumps(board, separators=(',', ':'))}\n"
+            f"Phase:{phase_name} MyTurn:{my_turn}\n"
+            f"Commands:\n{cmd_list}\n"
+            "Quick advice?"
         )
 
         self._last_call = time.time()
         try:
             resp = self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=self._model,
                 contents=prompt,
                 config=self._types.GenerateContentConfig(
                     system_instruction=ADVISOR_PROMPT,
-                    temperature=0.5,
-                    max_output_tokens=2048,
+                    temperature=0.3,
+                    max_output_tokens=512,
                     thinking_config=self._types.ThinkingConfig(thinking_budget=0),
                 ),
             )
@@ -116,11 +151,11 @@ class GeminiAdvisor:
         if not gs:
             return None
 
-        def card_info(cards: list) -> list[dict]:
-            """Return card name + description for each card."""
+        def card_detail(cards: list) -> list[dict]:
+            """Name + effect text for hand/field cards the AI needs to understand."""
             result = []
             for c in cards:
-                name = c.get("name") or f"Unknown(id={c.get('cardId', '?')})"
+                name = c.get("name") or f"id:{c.get('cardId', '?')}"
                 entry = {"name": name}
                 desc = c.get("desc")
                 if desc:
@@ -128,27 +163,26 @@ class GeminiAdvisor:
                 result.append(entry)
             return result
 
-        def card_names_only(cards: list) -> list[str]:
-            """Just names for GY/banished (descriptions would be too long)."""
-            return [c.get("name") or f"Unknown(id={c.get('cardId', '?')})" for c in cards]
+        def names(cards: list) -> list[str]:
+            return [c.get("name") or f"id:{c.get('cardId', '?')}" for c in cards]
 
-        def field_summary(field: dict) -> dict:
-            return {
-                "monsters": card_info(field.get("monsters", [])),
-                "spells": card_info(field.get("spells", [])),
-                "extraMonsters": card_info(field.get("extraMonsters", [])),
-            }
+        def field_summary(field: dict) -> list[dict]:
+            return card_detail(
+                field.get("monsters", [])
+                + field.get("spells", [])
+                + field.get("extraMonsters", [])
+            )
 
         return {
             "myLP": gs.get("myLP", "?"),
             "rivalLP": gs.get("rivalLP", "?"),
-            "myHand": card_info(gs.get("myHand", [])),
+            "myHand": card_detail(gs.get("myHand", [])),
             "myField": field_summary(gs.get("myField", {})),
             "rivalField": field_summary(gs.get("rivalField", {})),
-            "myGY": card_names_only(gs.get("myGY", [])),
-            "rivalGY": card_names_only(gs.get("rivalGY", [])),
-            "myBanished": card_names_only(gs.get("myBanished", [])),
-            "rivalBanished": card_names_only(gs.get("rivalBanished", [])),
+            "myGY": names(gs.get("myGY", [])),
+            "rivalGY": names(gs.get("rivalGY", [])),
+            "myBanished": names(gs.get("myBanished", [])),
+            "rivalBanished": names(gs.get("rivalBanished", [])),
             "myDeckCount": gs.get("myDeckCount", "?"),
             "myExtraDeckCount": gs.get("myExtraDeckCount", "?"),
             "rivalDeckCount": gs.get("rivalDeckCount", "?"),

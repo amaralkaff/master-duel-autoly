@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 
 import keyboard
 from colorama import init as colorama_init
@@ -16,6 +17,7 @@ from config import (
     HOTKEY_REVEAL,
     HOTKEY_ASSIST,
     HOTKEY_WIN_NOW,
+    HOTKEY_SPEED,
     SCAN_INTERVAL,
 )
 from memory.frida_il2cpp import FridaIL2CPP
@@ -81,18 +83,19 @@ def main() -> None:
 
     logger.info("Master Duel Bot starting...")
 
-    # -- Find game window --
+    # -- Wait for game window --
+    logger.info("Waiting for Master Duel window...")
     hwnd = find_window(WINDOW_TITLE)
-    if hwnd is None:
-        logger.error(f"Could not find window '{WINDOW_TITLE}'. Is the game running?")
-        sys.exit(1)
+    while hwnd is None:
+        time.sleep(2)
+        hwnd = find_window(WINDOW_TITLE)
     logger.ok(f"Found game window (HWND: {hex(hwnd)})")
 
-    # -- Attach Frida --
+    # -- Wait for Frida attach --
     frida_session = FridaIL2CPP()
-    if not frida_session.attach():
-        logger.error("Failed to attach Frida. Cannot proceed.")
-        sys.exit(1)
+    while not frida_session.attach():
+        logger.info("Waiting for masterduel.exe process...")
+        time.sleep(3)
     logger.ok("Frida IL2CPP session ready.")
 
     # -- Create autopilot (Solo only) --
@@ -136,6 +139,12 @@ def main() -> None:
         else:
             logger.info("AI Assist: GUI not ready yet")
 
+    def on_toggle_speed():
+        new = state.toggle_speed_hack()
+        scale = 3.0 if new else 1.0
+        frida_session.set_time_scale(scale)
+        logger.info(f"Speed Hack: {'ON (3x)' if new else 'OFF (1x)'}")
+
     def on_win_now():
         logger.info("One-shot instant win triggered!")
         try:
@@ -152,6 +161,7 @@ def main() -> None:
     keyboard.add_hotkey(HOTKEY_REVEAL, on_toggle_reveal, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_ASSIST, on_assist, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_WIN_NOW, on_win_now, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(HOTKEY_SPEED, on_toggle_speed, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(STOP_HOTKEY, on_quit, suppress=True, trigger_on_release=True)
 
     # -- Start worker thread --
@@ -163,7 +173,7 @@ def main() -> None:
     worker.start()
 
     # -- Start GUI (blocks main thread until window is closed) --
-    logger.ok("GUI starting. Press F1/F2/F3/F4/F5/F12.")
+    logger.ok("GUI starting. Press F1/F2/F3/F4/F5/F6/F12.")
 
     try:
         run_gui(frida_session, hwnd, state, log_buf, autopilot, advisor, _assist_cb)
