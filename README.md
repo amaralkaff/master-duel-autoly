@@ -1,29 +1,66 @@
 # Master Duel Autoly
 
-Instant win tool for Yu-Gi-Oh! Master Duel. Runs in background, no clicking needed.
+A tool for Yu-Gi-Oh! Master Duel with AI-powered duel advisor, instant win, card reveal, and autopilot features. Uses Frida to hook the game's IL2CPP runtime.
 
 ## Features
 
-- **Instant Win** — kill opponent LP instantly (auto or one-shot)
-- **Reveal Cards** — see opponent's hand and face-down cards during a duel
+- **AI Duel Advisor** — Gemini-powered real-time strategy advice. Reads your hand, field, GY, banished, LP, and card effects. Gives step-by-step play recommendations during live duels (Solo & PvP).
+- **Instant Win** — Set opponent LP to 0 instantly (toggle or one-shot).
+- **Reveal Cards** — See opponent's hand and face-down cards during a duel.
+- **Autopilot** — AI vs AI mode for Solo duels (CPU hook).
 
 ## Setup
 
+### Requirements
+
+- Python 3.10+
+- Yu-Gi-Oh! Master Duel (Steam)
+- Windows 10/11
+
+### Install
+
 ```
-pip install frida frida-tools keyboard pywin32 colorama rich
+pip install -r requirements.txt
 ```
 
-## Run
+### Gemini AI Setup (Optional)
 
-Start the game first, then:
+Create a `.env` file in the project root:
+
+```
+GEMINI_API_KEY=your_api_key_here
+```
+
+Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey).
+
+## Usage
+
+Start the game first, then run:
 
 ```
 python main.py
 ```
 
-| Key | What |
-|-----|------|
-| F1 | Toggle instant win |
-| F3 | Toggle reveal cards |
-| F5 | Instant win once |
-| F12 | Quit |
+### Hotkeys
+
+| Key  | Action              |
+|------|---------------------|
+| F1   | Toggle Instant Win  |
+| F2   | Toggle Autopilot    |
+| F3   | Toggle Reveal Cards |
+| F4   | AI Duel Advisor     |
+| F5   | Instant Win (once)  |
+| F12  | Quit                |
+
+### AI Advisor
+
+Press **F4** or click the **Ask AI** button during a duel. The advisor reads the full board state including card effects and available commands, then provides strategic advice like:
+
+- Optimal play sequence for your turn
+- What to negate or chain to on opponent's turn
+- Threat identification and counter-play
+- Deck archetype recognition
+
+## Disclaimer
+
+For educational and personal use only. Use at your own risk.

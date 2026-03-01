@@ -1218,16 +1218,25 @@ function getCardsInZone(player, zoneVal, zoneLabel, mi) {
     var activeMI = mi || getActiveCardMI();
     if (!activeMI) return [];
     var cards = [];
+    var useDllFallback = (_cardMI && activeMI !== _cardMI);
     try {
         var count = callCardFn(activeMI.getCardNum, [boxInt32(player), boxInt32(zoneVal)]);
+        // Fallback: if PVP_ getCardNum returned 0, try DLL_ version
+        if (count <= 0 && useDllFallback) {
+            count = callCardFn(_cardMI.getCardNum, [boxInt32(player), boxInt32(zoneVal)]);
+        }
         for (var i = 0; i < count && i < 20; i++) {
             var uid = callCardFn(activeMI.getCardUID, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            // Fallback: if PVP_ getCardUID returned 0, try DLL_ version
+            if (uid <= 0 && useDllFallback) {
+                uid = callCardFn(_cardMI.getCardUID, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            }
             var cardId = 0;
             var name = null;
             if (uid > 0) {
                 cardId = callCardFn(activeMI.getCardIDByUID, [boxInt32(uid)]);
                 // Fallback: if PVP_ method returned 0, try DLL_ version
-                if (cardId <= 0 && _cardMI && activeMI !== _cardMI) {
+                if (cardId <= 0 && useDllFallback) {
                     cardId = callCardFn(_cardMI.getCardIDByUID, [boxInt32(uid)]);
                 }
                 // Cache hit: use previously resolved cardId if current call returned 0
@@ -1239,6 +1248,10 @@ function getCardsInZone(player, zoneVal, zoneLabel, mi) {
                 if (cardId > 0) name = getCardName(cardId, activeMI);
             }
             var face = callCardFn(activeMI.getCardFace, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            // Fallback: if PVP_ getCardFace returned invalid, try DLL_ version
+            if ((face === null || face === undefined) && useDllFallback) {
+                face = callCardFn(_cardMI.getCardFace, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            }
             var desc = (cardId > 0) ? getCardDesc(cardId, activeMI) : null;
             cards.push({ cardId: cardId, name: name, desc: desc, uid: uid, face: face, zone: zoneLabel, index: i });
         }
