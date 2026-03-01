@@ -5,6 +5,7 @@ Instant win tool for Yu-Gi-Oh! Master Duel. Runs in background, no clicking need
 ## Features
 
 - **Instant Win** — kill opponent LP instantly (auto or one-shot)
+- **Reveal Cards** — see opponent's hand and face-down cards during a duel
 
 ## Setup
 
@@ -23,9 +24,6 @@ python main.py
 | Key | What |
 |-----|------|
 | F1 | Toggle instant win |
+| F3 | Toggle reveal cards |
 | F5 | Instant win once |
 | F12 | Quit |
-
-## Roadmap
-
-- Reveal enemy cards (see opponent's hand/set cards)

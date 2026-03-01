@@ -809,6 +809,445 @@ function readBasePtr() {
 
 const PLAYER_STRIDE = 0xDA4;
 
+// ── Card reveal ──
+// Master Duel zone constants (sequential, NOT bitmask!)
+// z1-z5:  Monster zones (positions 1-5)
+// z6-z10: Spell/Trap zones (positions 1-5)
+// z11-z12: Extra Monster zones
+// z13: HAND
+// z14: Extra Deck
+// z15: Main Deck
+// z16: Graveyard
+// z17: Banished
+const ZONE_HAND = 13;
+const ZONE_MONSTER_START = 1, ZONE_MONSTER_END = 5;
+const ZONE_SPELL_START = 6, ZONE_SPELL_END = 10;
+const ZONE_EXTRA_MONSTER_1 = 11, ZONE_EXTRA_MONSTER_2 = 12;
+const ZONE_GRAVE = 16;
+
+// Cached MethodInfo pointers for card query functions (called via invokeStatic)
+var _cardMI = null;  // { getCardNum, getCardUID, getCardFace, getCardIDByUID }
+var _pvpCardMI = null;  // PVP_ variants for online duels
+var _pvpTurnMI = null;  // { whichTurn, getPhase, getTurnNum, getLP }
+var _pvpCmdMI = null;   // PVP_ variants for command/dialog/list methods
+var _pvpMyselfIndex = null;  // Corrected player index for PvP (DLL_DuelMyself is unreliable)
+var _uidCardIdCache = {};    // UID -> cardId cache (survives intermittent 0 returns)
+
+// ── PvP mode detection ──
+
+/**
+ * Read a static bool/byte field from Engine class by field name.
+ * Uses il2cpp_field_static_get_value to read the raw byte.
+ */
+function readEngineStaticByte(engineKlass, fieldName) {
+    var iter = Memory.alloc(Process.pointerSize);
+    iter.writePointer(ptr(0));
+    while (true) {
+        var field = il2cpp_class_get_fields(engineKlass, iter);
+        if (field.isNull()) return -1;
+        if (readCStr(il2cpp_field_get_name(field)) === fieldName &&
+            !il2cpp_field_is_literal(field)) {
+            var buf = Memory.alloc(4);
+            buf.writeU32(0);
+            il2cpp_field_static_get_value(field, buf);
+            return buf.readU8();
+        }
+    }
+}
+
+/**
+ * Detect if current duel is online/PvP mode.
+ * Tries reading isOnlineMode from both static and instance fields.
+ * Falls back to probing PVP_DuelGetLP if field read fails.
+ */
+var _isOnlineCache = null;  // null = unknown, true/false = detected
+
+function isOnlineMode() {
+    if (_isOnlineCache !== null) return _isOnlineCache;
+
+    var engineKlass = findEngineClass();
+    if (!engineKlass) return false;
+
+    // Try static field first
+    var val = readEngineStaticByte(engineKlass, "isOnlineMode");
+    if (val === 1) { _isOnlineCache = true; return true; }
+
+    // Try reading as instance field from s_instance object
+    var inst = getStaticFieldPtr(engineKlass, "s_instance");
+    if (inst && !inst.isNull()) {
+        try {
+            // IL2CPP objects: header (klass+monitor) is 0x10 on 64-bit, then fields
+            // isOnlineMode offset from field enumeration is relative offset within fields
+            var fIter = Memory.alloc(Process.pointerSize);
+            fIter.writePointer(ptr(0));
+            while (true) {
+                var field = il2cpp_class_get_fields(engineKlass, fIter);
+                if (field.isNull()) break;
+                if (readCStr(il2cpp_field_get_name(field)) === "isOnlineMode" &&
+                    !il2cpp_field_is_literal(field)) {
+                    var offset = il2cpp_field_get_offset(field);
+                    var instVal = inst.add(offset).readU8();
+                    if (instVal === 1) { _isOnlineCache = true; return true; }
+                    break;
+                }
+            }
+        } catch (e) {}
+    }
+
+    // Probe: try PVP_DuelGetLP(0) and see if it returns non-zero
+    try {
+        if (!resolvePvpCardMethods()) return false;  // don't cache — may succeed later
+        if (_pvpTurnMI && _pvpTurnMI.getLP) {
+            var pvpLP = callCardFn(_pvpTurnMI.getLP, [boxInt32(0)]);
+            if (pvpLP > 0) {
+                send("isOnlineMode: detected via PVP_DuelGetLP probe (LP=" + pvpLP + ")");
+                _isOnlineCache = true;
+                return true;
+            }
+            // Also try player 1 in case player 0 LP isn't ready yet
+            pvpLP = callCardFn(_pvpTurnMI.getLP, [boxInt32(1)]);
+            if (pvpLP > 0) {
+                send("isOnlineMode: detected via PVP_DuelGetLP(1) probe (LP=" + pvpLP + ")");
+                _isOnlineCache = true;
+                return true;
+            }
+        }
+    } catch (e) {}
+
+    // Don't cache false — PvP detection may succeed on next call
+    return false;
+}
+
+/** Reset online mode cache (call when duel state changes). */
+function resetOnlineCache() {
+    _isOnlineCache = null;
+    _pvpMyselfIndex = null;
+}
+
+/**
+ * Detect which PVP player index is "us" by cross-referencing
+ * DLL_ (engine numbering, always "us" = 0) with PVP_ card counts.
+ * Returns 0 or 1, or -1 if undetermined.
+ */
+function detectPvpMyselfIndex() {
+    if (_pvpMyselfIndex !== null) return _pvpMyselfIndex;
+    if (!_cardMI || !_pvpCardMI) return -1;
+
+    try {
+        // DLL_ player 0 hand count = our hand in engine numbering
+        var dllHand = callCardFn(_cardMI.getCardNum, [boxInt32(0), boxInt32(13)]);
+        var dllDeck = callCardFn(_cardMI.getCardNum, [boxInt32(0), boxInt32(15)]);
+        if (dllHand <= 0 && dllDeck <= 0) return -1;  // duel not started yet
+
+        // PVP_ player 0 and 1 hand+deck counts
+        var pvpHand0 = callCardFn(_pvpCardMI.getCardNum, [boxInt32(0), boxInt32(13)]);
+        var pvpDeck0 = callCardFn(_pvpCardMI.getCardNum, [boxInt32(0), boxInt32(15)]);
+        var pvpHand1 = callCardFn(_pvpCardMI.getCardNum, [boxInt32(1), boxInt32(13)]);
+        var pvpDeck1 = callCardFn(_pvpCardMI.getCardNum, [boxInt32(1), boxInt32(15)]);
+
+        // Match: which PVP index has same hand+deck as DLL player 0?
+        var dllTotal = dllHand + dllDeck;
+        var pvpTotal0 = pvpHand0 + pvpDeck0;
+        var pvpTotal1 = pvpHand1 + pvpDeck1;
+
+        if (dllTotal === pvpTotal0 && dllTotal !== pvpTotal1) {
+            _pvpMyselfIndex = 0;
+            send("detectPvpMyself: matched player 0 (hand=" + dllHand + " deck=" + dllDeck + ")");
+            return 0;
+        }
+        if (dllTotal === pvpTotal1 && dllTotal !== pvpTotal0) {
+            _pvpMyselfIndex = 1;
+            send("detectPvpMyself: matched player 1 (hand=" + dllHand + " deck=" + dllDeck + ")");
+            return 1;
+        }
+
+        // Exact match failed (same totals) — try hand count only
+        if (dllHand === pvpHand0 && dllHand !== pvpHand1) {
+            _pvpMyselfIndex = 0;
+            send("detectPvpMyself: hand match player 0 (hand=" + dllHand + ")");
+            return 0;
+        }
+        if (dllHand === pvpHand1 && dllHand !== pvpHand0) {
+            _pvpMyselfIndex = 1;
+            send("detectPvpMyself: hand match player 1 (hand=" + dllHand + ")");
+            return 1;
+        }
+    } catch (e) {}
+    return -1;  // undetermined (both players have identical counts)
+}
+
+/**
+ * Resolve PVP_ variants of card methods for online duels.
+ */
+function resolvePvpCardMethods() {
+    if (_pvpCardMI) return true;
+
+    var domain = il2cpp_domain_get();
+    il2cpp_thread_attach(domain);
+
+    var engineKlass = findEngineClass();
+    if (!engineKlass) { send("resolvePvpCardMethods: Engine class not found"); return false; }
+
+    var mapping = [
+        ["PVP_DuelGetCardNum", 2],
+        ["PVP_DuelGetCardUniqueID", 3],
+        ["PVP_DuelGetCardFace", 3]
+    ];
+    var resolved = {};
+    for (var i = 0; i < mapping.length; i++) {
+        var mi = findMethodByName(engineKlass, mapping[i][0], mapping[i][1]);
+        if (!mi) { send("resolvePvpCardMethods: " + mapping[i][0] + " NOT FOUND"); return false; }
+        resolved[mapping[i][0]] = mi;
+    }
+    // CardIDByUniqueID: try PVP_ with "2" suffix first, then without, then DLL_ fallback
+    var getIDByUID = findMethodByName(engineKlass, "PVP_DuelGetCardIDByUniqueID2", 1);
+    if (!getIDByUID) getIDByUID = findMethodByName(engineKlass, "PVP_DuelGetCardIDByUniqueID", 1);
+    if (!getIDByUID) {
+        // Fall back to DLL_ version (shared engine data, works in both modes)
+        resolveCardMethods();
+        if (_cardMI) getIDByUID = _cardMI.getCardIDByUID;
+    }
+    if (!getIDByUID) { send("resolvePvpCardMethods: No CardIDByUniqueID method found"); return false; }
+    resolved["getCardIDByUID"] = getIDByUID;
+
+    // Turn/Phase/LP methods
+    var turnMethods = [
+        ["PVP_DuelWhichTurnNow", 0],
+        ["PVP_DuelGetCurrentPhase", 0],
+        ["PVP_DuelGetTurnNum", 0],
+        ["PVP_DuelGetLP", 1]
+    ];
+    var turnResolved = {};
+    for (var i = 0; i < turnMethods.length; i++) {
+        var mi = findMethodByName(engineKlass, turnMethods[i][0], turnMethods[i][1]);
+        if (!mi) { send("resolvePvpCardMethods: " + turnMethods[i][0] + " NOT FOUND"); }
+        turnResolved[turnMethods[i][0]] = mi;
+    }
+
+    _pvpCardMI = {
+        getCardNum:    resolved["PVP_DuelGetCardNum"],
+        getCardUID:    resolved["PVP_DuelGetCardUniqueID"],
+        getCardFace:   resolved["PVP_DuelGetCardFace"],
+        getCardIDByUID: resolved["getCardIDByUID"]
+    };
+
+    _pvpTurnMI = {
+        whichTurn: turnResolved["PVP_DuelWhichTurnNow"],
+        getPhase:  turnResolved["PVP_DuelGetCurrentPhase"],
+        getTurnNum: turnResolved["PVP_DuelGetTurnNum"],
+        getLP:     turnResolved["PVP_DuelGetLP"]
+    };
+
+    // Reuse card name lookup from DLL resolve (it's shared)
+    if (_cardMI && _cardMI.contentGetInstance) {
+        _pvpCardMI.contentGetInstance = _cardMI.contentGetInstance;
+        _pvpCardMI.contentGetName = _cardMI.contentGetName;
+    } else {
+        var contentClass = findClassByName("YgomGame.Card", "Content");
+        if (contentClass) {
+            var getInstance = findMethodByName(contentClass, "get_Instance", 0);
+            var getNameMethod = findMethodByName(contentClass, "GetName", 2);
+            var getDescMethod = findMethodByName(contentClass, "GetDesc", 2);
+            if (getInstance && getNameMethod) {
+                _pvpCardMI.contentGetInstance = getInstance;
+                _pvpCardMI.contentGetName = getNameMethod;
+                if (getDescMethod) _pvpCardMI.contentGetDesc = getDescMethod;
+            }
+        }
+    }
+
+    send("resolvePvpCardMethods: all PVP_ methods resolved");
+    return true;
+}
+
+/**
+ * Resolve PVP_ variants of command/dialog/list methods for online duels.
+ * These are optional — if a PVP_ variant is not found, the caller falls back to DLL_/managed.
+ */
+function resolvePvpCommandMethods() {
+    if (_pvpCmdMI) return _pvpCmdMI;
+
+    var engineKlass = findEngineClass();
+    if (!engineKlass) return null;
+
+    var cache = {};
+
+    // Command methods (all optional — store null if not found)
+    var methods = [
+        ["PVP_DuelComGetCommandMask", 3],
+        ["PVP_DuelComGetMovablePhase", 0],
+        ["PVP_ComDoCommand", 4],
+        ["PVP_DuelDlgSetResult", 1],
+        ["PVP_DuelListSendIndex", 1],
+        // Input state methods
+        ["PVP_IsSysActLoopExecute", 0],
+        ["PVP_DuelDlgGetSelectItemNum", 0],
+        ["PVP_DuelDlgCanYesNoSkip", 0],
+        ["PVP_DuelDlgGetPosMaskOfThisSummon", 0],
+        ["PVP_DuelListIsMultiMode", 0],
+        ["PVP_DuelListGetSelectMax", 0],
+        ["PVP_DuelListGetSelectMin", 0],
+        ["PVP_DuelListGetItemMax", 0],
+        ["PVP_DuelListGetItemID", 1],
+        ["PVP_DuelListGetItemUniqueID", 1],
+        ["PVP_DuelListGetItemFrom", 1],
+        ["PVP_DuelDlgGetMixNum", 0]
+    ];
+    for (var i = 0; i < methods.length; i++) {
+        cache[methods[i][0]] = findMethodByName(engineKlass, methods[i][0], methods[i][1]);
+    }
+
+    _pvpCmdMI = cache;
+    send("resolvePvpCommandMethods: resolved " + Object.keys(cache).filter(function(k) { return cache[k] !== null; }).length + "/" + methods.length + " methods");
+    return _pvpCmdMI;
+}
+
+/**
+ * Get the active card method set based on duel mode.
+ * Returns PVP_ methods for online duels, DLL_ for solo.
+ */
+function getActiveCardMI() {
+    // Always resolve DLL_ methods as fallback (needed even in PVP mode)
+    resolveCardMethods();
+    if (isOnlineMode()) {
+        if (!resolvePvpCardMethods()) return _cardMI;  // fall back to DLL_ if PVP_ fails
+        return _pvpCardMI;
+    }
+    if (!_cardMI) return null;
+    return _cardMI;
+}
+
+function resolveCardMethods() {
+    if (_cardMI) return true;
+
+    var domain = il2cpp_domain_get();
+    il2cpp_thread_attach(domain);
+
+    var engineKlass = findEngineClass();
+    if (!engineKlass) { send("resolveCardMethods: Engine class not found"); return false; }
+
+    var names = [
+        "DLL_DuelGetCardNum",           // (int player, int locate) -> int
+        "DLL_DuelGetCardUniqueID",      // (int player, int locate, int index) -> int
+        "DLL_DuelGetCardFace",          // (int player, int locate, int index) -> int
+        "DLL_DuelGetCardIDByUniqueID2"  // (int uniqueID) -> int
+    ];
+    var resolved = {};
+    for (var i = 0; i < names.length; i++) {
+        var mi = findMethodByName(engineKlass, names[i], -1);
+        if (!mi) { send("resolveCardMethods: " + names[i] + " NOT FOUND"); return false; }
+        resolved[names[i]] = mi;
+    }
+    send("resolveCardMethods: all " + names.length + " methods resolved");
+
+    _cardMI = {
+        getCardNum:    resolved["DLL_DuelGetCardNum"],
+        getCardUID:    resolved["DLL_DuelGetCardUniqueID"],
+        getCardFace:   resolved["DLL_DuelGetCardFace"],
+        getCardIDByUID: resolved["DLL_DuelGetCardIDByUniqueID2"]
+    };
+
+    // Resolve card name + desc lookup via YgomGame.Card.Content singleton
+    var contentClass = findClassByName("YgomGame.Card", "Content");
+    if (contentClass) {
+        var getInstance = findMethodByName(contentClass, "get_Instance", 0);
+        var getNameMethod = findMethodByName(contentClass, "GetName", 2);
+        var getDescMethod = findMethodByName(contentClass, "GetDesc", 2);
+        if (getInstance && getNameMethod) {
+            _cardMI.contentGetInstance = getInstance;
+            _cardMI.contentGetName = getNameMethod;
+            if (getDescMethod) _cardMI.contentGetDesc = getDescMethod;
+            send("resolveCardMethods: Card.Content.GetName" + (getDescMethod ? "+GetDesc" : "") + " resolved");
+        }
+    }
+
+    return true;
+}
+
+/** Call a static Engine P/Invoke method via il2cpp_runtime_invoke, return unboxed int. */
+function callCardFn(methodInfo, args) {
+    var result = invokeStatic(methodInfo, args);
+    if (!result || result.isNull()) return 0;
+    return result.add(0x10).readS32();
+}
+
+/** Get card name from Card.Content singleton. Returns string or null. */
+var _contentInstance = null;
+function getCardName(cardId, mi) {
+    var activeMI = mi || _cardMI || _pvpCardMI;
+    if (!activeMI || !activeMI.contentGetName) return null;
+    try {
+        if (!_contentInstance) {
+            _contentInstance = invokeStatic(activeMI.contentGetInstance, []);
+        }
+        if (!_contentInstance || _contentInstance.isNull()) return null;
+        // GetName(int cardId, int lang) — lang 0 = default/English
+        var nameObj = invokeInstance(activeMI.contentGetName, _contentInstance,
+            [boxInt32(cardId), boxInt32(0)]);
+        return readIl2cppString(nameObj);
+    } catch (e) {
+        return null;
+    }
+}
+
+/** Get card description from Card.Content singleton. Returns string or null. */
+function getCardDesc(cardId, mi) {
+    var activeMI = mi || _cardMI || _pvpCardMI;
+    if (!activeMI || !activeMI.contentGetDesc) return null;
+    try {
+        if (!_contentInstance) {
+            _contentInstance = invokeStatic(activeMI.contentGetInstance, []);
+        }
+        if (!_contentInstance || _contentInstance.isNull()) return null;
+        // GetDesc(int cardId, int lang) — lang 0 = default/English
+        var descObj = invokeInstance(activeMI.contentGetDesc, _contentInstance,
+            [boxInt32(cardId), boxInt32(0)]);
+        return readIl2cppString(descObj);
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Query cards in a specific zone for a player using il2cpp_runtime_invoke.
+ * Returns array of {cardId, name, uid, face, zone, index}.
+ * zoneLabel is a short string for display (e.g. "M2" for monster zone 2).
+ * mi: optional method info set to use (defaults to auto-detect via getActiveCardMI).
+ */
+function getCardsInZone(player, zoneVal, zoneLabel, mi) {
+    var activeMI = mi || getActiveCardMI();
+    if (!activeMI) return [];
+    var cards = [];
+    try {
+        var count = callCardFn(activeMI.getCardNum, [boxInt32(player), boxInt32(zoneVal)]);
+        for (var i = 0; i < count && i < 20; i++) {
+            var uid = callCardFn(activeMI.getCardUID, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            var cardId = 0;
+            var name = null;
+            if (uid > 0) {
+                cardId = callCardFn(activeMI.getCardIDByUID, [boxInt32(uid)]);
+                // Fallback: if PVP_ method returned 0, try DLL_ version
+                if (cardId <= 0 && _cardMI && activeMI !== _cardMI) {
+                    cardId = callCardFn(_cardMI.getCardIDByUID, [boxInt32(uid)]);
+                }
+                // Cache hit: use previously resolved cardId if current call returned 0
+                if (cardId > 0) {
+                    _uidCardIdCache[uid] = cardId;
+                } else if (_uidCardIdCache[uid]) {
+                    cardId = _uidCardIdCache[uid];
+                }
+                if (cardId > 0) name = getCardName(cardId, activeMI);
+            }
+            var face = callCardFn(activeMI.getCardFace, [boxInt32(player), boxInt32(zoneVal), boxInt32(i)]);
+            var desc = (cardId > 0) ? getCardDesc(cardId, activeMI) : null;
+            cards.push({ cardId: cardId, name: name, desc: desc, uid: uid, face: face, zone: zoneLabel, index: i });
+        }
+    } catch (e) {
+        send("getCardsInZone error (zone=" + zoneVal + "): " + e.message);
+    }
+    return cards;
+}
+
 // ── IL2CPP class enumeration ──
 
 function enumerateClasses(namespaceFilter) {
@@ -886,6 +1325,252 @@ function enumerateClasses(namespaceFilter) {
     return results;
 }
 
+// ── In-game reveal hooks ──
+// Hook the rendering layer so rival's hidden cards appear face-up in-game.
+// Strategy:
+// 1. Hook CardRoot.Update — set isFace=true on rival cards, call ValidateFlipTurn
+//    to trigger the visual 3D model flip (not just the data flag).
+// 2. Hook HandCardManager..ctor + Initialize to capture the instance, then
+//    force farAllOpen=true so opponent's hand cards render face-up.
+
+var _revealHooksInstalled = false;
+var _revealHookListeners = [];
+
+// Field offsets (from IL2CPP enumeration)
+var CARDROOT_TEAM_OFFSET    = 0x90;  // <team>k__BackingField (int32)
+var CARDROOT_ISFACE_OFFSET  = 0xa4;  // <isFace>k__BackingField (bool/byte)
+var CARDROOT_ISATTACK_OFFSET = 0xa5; // <isAttack>k__BackingField (bool/byte)
+var CARDROOT_CARDID_OFFSET  = 0x9c;  // <cardId>k__BackingField (int32)
+var CARDROOT_PLANE_OFFSET   = 0x78;  // <cardPlane>k__BackingField (ptr)
+var HANDMGR_FAR_ALLOPEN_OFFSET = 0x21; // <farAllOpen>k__BackingField (bool/byte)
+
+var _capturedHandMgr = null;
+var _flipTurnMethod = null;  // CardPlane.FlipTurn(bool,bool,bool,bool,Action)
+
+// Pre-allocated boolean buffers for FlipTurn args
+var _boolTrue = null;
+var _boolFalse = null;
+var _nullRef = null;
+
+function installRevealHooks() {
+    if (_revealHooksInstalled) return { success: true, status: "already_installed" };
+
+    var domain = il2cpp_domain_get();
+    il2cpp_thread_attach(domain);
+
+    if (!_duelRivalFn) resolveNativeLP();
+
+    // Pre-allocate param buffers
+    _boolTrue = Memory.alloc(1);  _boolTrue.writeU8(1);
+    _boolFalse = Memory.alloc(1); _boolFalse.writeU8(0);
+    _nullRef = Memory.alloc(Process.pointerSize); _nullRef.writePointer(ptr(0));
+
+    var hooked = [];
+
+    // ---- Resolve CardPlane.FlipTurn ----
+    var planeCls = findClassByName("YgomGame.Duel", "CardPlane");
+    if (planeCls) {
+        _flipTurnMethod = findMethodByName(planeCls, "FlipTurn", 5);
+        send("[RevealHook] CardPlane.FlipTurn resolved: " + !!_flipTurnMethod);
+    }
+
+    // ---- Hook CardRoot.Update — call FlipTurn on rival's face-down cards ----
+    var cardRootCls = findClassByName("YgomGame.Duel", "CardRoot");
+    if (cardRootCls) {
+        var updateMethod = findMethodByName(cardRootCls, "Update", 0);
+        if (updateMethod) {
+            var updateAddr = updateMethod.readPointer();
+            var _logCount = 0;
+            var _errCount = 0;
+            var updateListener = Interceptor.attach(updateAddr, {
+                onEnter: function (args) {
+                    try {
+                        var thisPtr = args[0];
+                        if (thisPtr.isNull()) return;
+
+                        var cardId = thisPtr.add(CARDROOT_CARDID_OFFSET).readS32();
+                        if (cardId <= 0) return;
+
+                        var team = thisPtr.add(CARDROOT_TEAM_OFFSET).readS32();
+                        var rival = 1;
+                        try { if (_duelRivalFn) rival = _duelRivalFn(ptr(0)); } catch (e) {}
+                        if (rival < 0 || rival > 1) rival = 1;
+                        if (team !== rival) return;
+
+                        var isFace = thisPtr.add(CARDROOT_ISFACE_OFFSET).readU8();
+                        if (isFace !== 0) return;
+
+                        // Read current isAttack to preserve attack/defense position
+                        var isAttack = thisPtr.add(CARDROOT_ISATTACK_OFFSET).readU8();
+                        var isAttackBuf = isAttack ? _boolTrue : _boolFalse;
+
+                        // Get CardPlane and call FlipTurn to visually flip the 3D model
+                        var planePtr = thisPtr.add(CARDROOT_PLANE_OFFSET).readPointer();
+                        if (planePtr.isNull()) {
+                            if (_errCount < 3) { _errCount++; send("[RevealHook] planePtr null for cardId=" + cardId); }
+                            return;
+                        }
+
+                        if (_flipTurnMethod && !planePtr.isNull()) {
+                            // Safety: verify the object pointer looks valid before calling
+                            try {
+                                planePtr.readPointer(); // test read — will throw if invalid
+                            } catch (_) {
+                                // Invalid pointer, skip silently
+                                return;
+                            }
+                            try {
+                                invokeInstance(_flipTurnMethod, planePtr, [
+                                    _boolTrue,    // isFace = true
+                                    isAttackBuf,  // isAttack = preserve current
+                                    _boolTrue,    // immediate = true (instant flip)
+                                    _boolFalse,   // deckFlip = false
+                                    _nullRef      // onFinished = null
+                                ]);
+
+                                _logCount++;
+                                if (_logCount <= 10) {
+                                    send("[RevealHook] FlipTurn OK cardId=" + cardId +
+                                         " plane=" + planePtr + " atk=" + isAttack);
+                                }
+                            } catch (flipErr) {
+                                _errCount++;
+                                if (_errCount <= 3) {
+                                    send("[RevealHook] FlipTurn skip cardId=" + cardId);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        _errCount++;
+                        if (_errCount <= 5) send("[RevealHook] outer error: " + e.message);
+                    }
+                }
+            });
+            _revealHookListeners.push(updateListener);
+            hooked.push("CardRoot.Update");
+            send("[RevealHook] CardRoot.Update hooked at " + updateAddr);
+        }
+    }
+
+    // ---- Capture HandCardManager instance via multiple hooks ----
+    var handMgrCls = findClassByName("YgomGame.Duel", "HandCardManager");
+    if (handMgrCls) {
+        // Hook .ctor to capture on creation
+        var ctorMethod = findMethodByName(handMgrCls, ".ctor", 0);
+        if (ctorMethod) {
+            var ctorAddr = ctorMethod.readPointer();
+            var ctorListener = Interceptor.attach(ctorAddr, {
+                onEnter: function (args) { this._mgr = args[0]; },
+                onLeave: function () {
+                    try {
+                        if (this._mgr && !this._mgr.isNull()) {
+                            _capturedHandMgr = this._mgr;
+                            _capturedHandMgr.add(HANDMGR_FAR_ALLOPEN_OFFSET).writeU8(1);
+                            send("[RevealHook] HandCardManager captured via .ctor, farAllOpen=true");
+                        }
+                    } catch (e) {}
+                }
+            });
+            _revealHookListeners.push(ctorListener);
+            hooked.push("HandCardManager..ctor");
+        }
+
+        // Hook Initialize
+        var initMethod = findMethodByName(handMgrCls, "Initialize", -1);
+        if (initMethod) {
+            var initAddr = initMethod.readPointer();
+            var initListener = Interceptor.attach(initAddr, {
+                onEnter: function (args) { _capturedHandMgr = args[0]; },
+                onLeave: function () {
+                    try {
+                        if (_capturedHandMgr && !_capturedHandMgr.isNull()) {
+                            _capturedHandMgr.add(HANDMGR_FAR_ALLOPEN_OFFSET).writeU8(1);
+                            send("[RevealHook] HandCardManager.Initialize: farAllOpen=true");
+                        }
+                    } catch (e) {}
+                }
+            });
+            _revealHookListeners.push(initListener);
+            hooked.push("HandCardManager.Initialize");
+        }
+
+        // Hook AddFarHandCard + SyncFarHandInfo + SetFarHandInfo
+        var handHookNames = ["AddFarHandCard", "SyncFarHandInfo", "SetFarHandInfo"];
+        for (var hi = 0; hi < handHookNames.length; hi++) {
+            var hm = findMethodByName(handMgrCls, handHookNames[hi], -1);
+            if (hm) {
+                var hAddr = hm.readPointer();
+                (function (name) {
+                    var _hLog = 0;
+                    var listener = Interceptor.attach(hAddr, {
+                        onEnter: function (args) {
+                            try { _capturedHandMgr = args[0]; } catch (e) {}
+                        },
+                        onLeave: function () {
+                            try {
+                                if (_capturedHandMgr && !_capturedHandMgr.isNull()) {
+                                    _capturedHandMgr.add(HANDMGR_FAR_ALLOPEN_OFFSET).writeU8(1);
+                                    _hLog++;
+                                    if (_hLog <= 3)
+                                        send("[RevealHook] " + name + ": farAllOpen=true");
+                                }
+                            } catch (e) {}
+                        }
+                    });
+                    _revealHookListeners.push(listener);
+                    hooked.push("HandCardManager." + name);
+                })(handHookNames[hi]);
+            }
+        }
+
+        // Hook GetFarHandCardNum — called frequently to check hand size
+        var getNumMethod = findMethodByName(handMgrCls, "GetFarHandCardNum", 0);
+        if (getNumMethod) {
+            var getNumAddr = getNumMethod.readPointer();
+            var _numCaptured = false;
+            var getNumListener = Interceptor.attach(getNumAddr, {
+                onEnter: function (args) {
+                    if (_numCaptured) return;
+                    try {
+                        _capturedHandMgr = args[0];
+                        if (_capturedHandMgr && !_capturedHandMgr.isNull()) {
+                            _capturedHandMgr.add(HANDMGR_FAR_ALLOPEN_OFFSET).writeU8(1);
+                            _numCaptured = true;
+                            send("[RevealHook] HandCardManager captured via GetFarHandCardNum, farAllOpen=true");
+                        }
+                    } catch (e) {}
+                }
+            });
+            _revealHookListeners.push(getNumListener);
+            hooked.push("HandCardManager.GetFarHandCardNum");
+        }
+    }
+
+    if (hooked.length === 0) {
+        return { success: false, error: "No rendering methods found to hook" };
+    }
+
+    _revealHooksInstalled = true;
+    return { success: true, hooked: hooked };
+}
+
+function removeRevealHooks() {
+    if (!_revealHooksInstalled) return { success: true, status: "not_installed" };
+
+    for (var i = 0; i < _revealHookListeners.length; i++) {
+        try {
+            _revealHookListeners[i].detach();
+        } catch (e) {
+            send("[RevealHook] detach error: " + e.message);
+        }
+    }
+    _revealHookListeners = [];
+    _capturedHandMgr = null;
+    _revealHooksInstalled = false;
+    send("[RevealHook] hooks removed");
+    return { success: true };
+}
+
 // ══════════════════════════════════════════
 // RPC exports
 // ══════════════════════════════════════════
@@ -908,13 +1593,13 @@ rpc.exports = {
         const domain = il2cpp_domain_get();
         il2cpp_thread_attach(domain);
 
-        if (!resolveNativeLP()) return { error: "Could not resolve native LP" };
-
         // Check if Engine instance exists
         const engineKlass = findEngineClass();
         if (!engineKlass) return { error: "Engine class not found" };
         const inst = getStaticFieldPtr(engineKlass, "s_instance");
         if (!inst || inst.isNull()) return { error: "No Engine instance (duel not active)" };
+
+        var online = isOnlineMode();
 
         let myself = -1, rival = -1;
         try {
@@ -922,16 +1607,37 @@ rpc.exports = {
             if (_duelRivalFn) rival = _duelRivalFn(ptr(0));
         } catch (e) {}
 
-        const xorKey = readXorKey();
-        const basePtr = readBasePtr();
-        const lp0 = xorKey ^ basePtr.readS32();
-        const lp1 = xorKey ^ basePtr.add(PLAYER_STRIDE).readS32();
+        var lp0 = 0, lp1 = 0, xorKey = 0;
+
+        // Try PVP_ LP first
+        resolvePvpCardMethods();
+        if (_pvpTurnMI && _pvpTurnMI.getLP) {
+            try {
+                lp0 = callCardFn(_pvpTurnMI.getLP, [boxInt32(0)]);
+                lp1 = callCardFn(_pvpTurnMI.getLP, [boxInt32(1)]);
+            } catch (e) {}
+            if (lp0 > 0 || lp1 > 0) {
+                online = true;
+                _isOnlineCache = true;
+            }
+        }
+
+        // Fallback to native XOR (solo)
+        if (lp0 === 0 && lp1 === 0 && resolveNativeLP()) {
+            try {
+                xorKey = readXorKey();
+                const basePtr = readBasePtr();
+                lp0 = xorKey ^ basePtr.readS32();
+                lp1 = xorKey ^ basePtr.add(PLAYER_STRIDE).readS32();
+            } catch (e) {}
+        }
 
         return {
             myself: myself,
             rival: rival,
             lp: [lp0, lp1],
-            xorKey: xorKey
+            xorKey: xorKey,
+            online: online
         };
     },
 
@@ -1003,9 +1709,58 @@ rpc.exports = {
         const domain = il2cpp_domain_get();
         il2cpp_thread_attach(domain);
         const engineKlass = findEngineClass();
-        if (!engineKlass) return false;
+        if (!engineKlass) { resetOnlineCache(); return false; }
         const inst = getStaticFieldPtr(engineKlass, "s_instance");
-        return inst !== null && !inst.isNull();
+        if (!inst || inst.isNull()) { resetOnlineCache(); return false; }
+        return true;
+    },
+
+    /**
+     * Diagnostic: check Engine state and enumerate PVP_/THREAD_ method variants.
+     * Run this during a PvP duel to understand what's available.
+     */
+    diagpvp: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var result = { engineClassFound: false, sInstance: null, staticFields: [], pvpMethods: [], threadMethods: [], dllMethods: [] };
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return result;
+        result.engineClassFound = true;
+
+        // Check s_instance
+        var inst = getStaticFieldPtr(engineKlass, "s_instance");
+        result.sInstance = inst ? ("0x" + inst.toString(16)) : "null";
+        result.sInstanceIsNull = !inst || inst.isNull();
+
+        // Enumerate all static fields and their values
+        var fIter = Memory.alloc(Process.pointerSize);
+        fIter.writePointer(ptr(0));
+        while (true) {
+            var field = il2cpp_class_get_fields(engineKlass, fIter);
+            if (field.isNull()) break;
+            var fname = il2cpp_field_get_name(field).readUtf8String();
+            var foffset = il2cpp_field_get_offset(field);
+            var isLiteral = il2cpp_field_is_literal(field);
+            result.staticFields.push({ name: fname, offset: foffset, isLiteral: isLiteral });
+        }
+
+        // Enumerate all methods, categorize by prefix
+        var mIter = Memory.alloc(Process.pointerSize);
+        mIter.writePointer(ptr(0));
+        while (true) {
+            var method = il2cpp_class_get_methods(engineKlass, mIter);
+            if (method.isNull()) break;
+            var mname = il2cpp_method_get_name(method).readUtf8String();
+            var paramCount = il2cpp_method_get_param_count(method);
+            var entry = { name: mname, params: paramCount };
+            if (mname.indexOf("PVP_") === 0) result.pvpMethods.push(entry);
+            else if (mname.indexOf("THREAD_") === 0) result.threadMethods.push(entry);
+            else if (mname.indexOf("DLL_Duel") === 0) result.dllMethods.push(entry);
+        }
+
+        return result;
     },
 
     // ══════════════════════════════════════════
@@ -2537,8 +3292,1146 @@ rpc.exports = {
         } catch (e) {
             return { error: e.message };
         }
+    },
+
+    /**
+     * Install/remove Interceptor hooks so rival's hidden cards appear face-up in-game.
+     * enable=true installs hooks, enable=false removes them.
+     */
+    hookreveal: function (enable) {
+        if (enable) {
+            return installRevealHooks();
+        } else {
+            return removeRevealHooks();
+        }
+    },
+
+    /**
+     * Reveal opponent's hand cards and face-down cards on the field.
+     * Uses Master Duel zone constants (sequential IDs, not bitmask):
+     *   z1-z5: Monster zones, z6-z10: Spell/Trap zones,
+     *   z11-z12: Extra Monster zones, z13: Hand
+     */
+    reveal: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+        var inst = getStaticFieldPtr(engineKlass, "s_instance");
+        if (!inst || inst.isNull()) return { error: "No duel active" };
+
+        if (!resolveCardMethods()) return { error: "Could not resolve card methods" };
+        resolveNativeLP();
+
+        var rival = 1;
+        try {
+            if (_duelRivalFn) rival = _duelRivalFn(ptr(0));
+        } catch (e) {}
+        if (rival < 0 || rival > 1) rival = 1;
+
+        // Query rival's HAND (zone 13)
+        var handCards = getCardsInZone(rival, ZONE_HAND, "H");
+        var hand = [];
+        for (var i = 0; i < handCards.length; i++) {
+            var c = handCards[i];
+            hand.push({ id: c.cardId, name: c.name });
+        }
+
+        // Query rival's field zones for face-down cards
+        var facedown = [];
+
+        // Monster zones (z1-z5) + Extra Monster zones (z11-z12)
+        for (var z = ZONE_MONSTER_START; z <= ZONE_MONSTER_END; z++) {
+            var cards = getCardsInZone(rival, z, "M" + z);
+            for (var i = 0; i < cards.length; i++) {
+                if (cards[i].face === 0) {
+                    facedown.push({ id: cards[i].cardId, name: cards[i].name,
+                                    zone: "M", index: z });
+                }
+            }
+        }
+        // Extra monster zones
+        for (var z = ZONE_EXTRA_MONSTER_1; z <= ZONE_EXTRA_MONSTER_2; z++) {
+            var cards = getCardsInZone(rival, z, "EM" + (z - ZONE_EXTRA_MONSTER_1 + 1));
+            for (var i = 0; i < cards.length; i++) {
+                if (cards[i].face === 0) {
+                    facedown.push({ id: cards[i].cardId, name: cards[i].name,
+                                    zone: "EM", index: z - ZONE_EXTRA_MONSTER_1 + 1 });
+                }
+            }
+        }
+
+        // Spell/Trap zones (z6-z10)
+        for (var z = ZONE_SPELL_START; z <= ZONE_SPELL_END; z++) {
+            var cards = getCardsInZone(rival, z, "S" + (z - ZONE_SPELL_START + 1));
+            for (var i = 0; i < cards.length; i++) {
+                if (cards[i].face === 0) {
+                    facedown.push({ id: cards[i].cardId, name: cards[i].name,
+                                    zone: "S", index: z - ZONE_SPELL_START + 1 });
+                }
+            }
+        }
+
+        return { hand: hand, facedown: facedown };
+    },
+
+    /**
+     * Deep diagnostic: game state, zone scan, list approach, search functions.
+     */
+    zonescan: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+        var inst = getStaticFieldPtr(engineKlass, "s_instance");
+        if (!inst || inst.isNull()) return { error: "No duel active" };
+        if (!resolveCardMethods()) return { error: "Could not resolve card methods" };
+        resolveNativeLP();
+
+        var myself = 0, rival = 1;
+        try {
+            if (_duelRivalFn) rival = _duelRivalFn(ptr(0));
+            if (_duelMyselfFn) myself = _duelMyselfFn(ptr(0));
+        } catch (e) {}
+
+        // Resolve additional diagnostic methods
+        var whichTurn = findMethodByName(engineKlass, "DLL_DuelWhichTurnNow", -1);
+        var getPhase = findMethodByName(engineKlass, "DLL_DuelGetCurrentPhase", -1);
+        var getTurnNum = findMethodByName(engineKlass, "DLL_DuelGetTurnNum", -1);
+        var getHandOpen = findMethodByName(engineKlass, "DLL_DuelGetHandCardOpen", -1);
+        var searchByUID = findMethodByName(engineKlass, "DLL_DuelSearchCardByUniqueID", -1);
+        var getCardInHand = findMethodByName(engineKlass, "DLL_DuelGetCardInHand", -1);
+        var listGetMax = findMethodByName(engineKlass, "DLL_DuelListGetItemMax", -1);
+        var listGetID = findMethodByName(engineKlass, "DLL_DuelListGetItemID", -1);
+        var listGetUID = findMethodByName(engineKlass, "DLL_DuelListGetItemUniqueID", -1);
+        var getCardProp = findMethodByName(engineKlass, "DLL_DuelGetCardPropByUniqueID", -1);
+        var isCardExist = findMethodByName(engineKlass, "DLL_DuelIsThisCardExist", -1);
+        var topCard = findMethodByName(engineKlass, "DLL_DuelGetTopCardIndex", -1);
+        var getDuelFinish = findMethodByName(engineKlass, "DLL_DuelGetDuelFinish", -1);
+
+        var results = { myself: myself, rival: rival };
+
+        // Game state
+        try {
+            if (whichTurn) results.whichTurn = callCardFn(whichTurn, []);
+            if (getPhase) results.phase = callCardFn(getPhase, []);
+            if (getTurnNum) results.turnNum = callCardFn(getTurnNum, []);
+            if (getDuelFinish) results.duelFinish = callCardFn(getDuelFinish, []);
+        } catch(e) { results.stateError = e.message; }
+
+        // Zone scan: test ALL values 0-70 to find every zone
+        results.zones = {};
+        var testVals = [];
+        for (var v = 0; v <= 70; v++) testVals.push(v);
+
+        for (var p = 0; p <= 1; p++) {
+            var pLabel = "p" + p + (p === myself ? "_ME" : "_RIVAL");
+            var pData = {};
+            for (var ti = 0; ti < testVals.length; ti++) {
+                var zv = testVals[ti];
+                try {
+                    var count = callCardFn(_cardMI.getCardNum,
+                        [boxInt32(p), boxInt32(zv)]);
+                    if (count > 0 && count < 100) {
+                        var cards = [];
+                        for (var i = 0; i < count && i < 15; i++) {
+                            var uid = callCardFn(_cardMI.getCardUID,
+                                [boxInt32(p), boxInt32(zv), boxInt32(i)]);
+                            var face = callCardFn(_cardMI.getCardFace,
+                                [boxInt32(p), boxInt32(zv), boxInt32(i)]);
+                            var cardId = 0, name = null;
+                            if (uid > 0) {
+                                cardId = callCardFn(_cardMI.getCardIDByUID, [boxInt32(uid)]);
+                                if (cardId > 0) name = getCardName(cardId);
+                            }
+                            cards.push({i:i, uid:uid, cid:cardId, name:name, face:face});
+                        }
+                        pData["z" + zv] = {count:count, cards:cards};
+                    }
+                } catch (e) {}
+            }
+            results.zones[pLabel] = pData;
+        }
+
+        // List-based hand approach
+        results.listHand = {};
+        if (getCardInHand && listGetMax && listGetID) {
+            for (var p = 0; p <= 1; p++) {
+                try {
+                    callCardFn(getCardInHand, [boxInt32(p)]);
+                    var max = callCardFn(listGetMax, []);
+                    var items = [];
+                    for (var i = 0; i < max && i < 15; i++) {
+                        var cid = callCardFn(listGetID, [boxInt32(i)]);
+                        var uid = listGetUID ? callCardFn(listGetUID, [boxInt32(i)]) : -1;
+                        var nm = getCardName(cid);
+                        items.push({cid:cid, uid:uid, name:nm});
+                    }
+                    results.listHand["p"+p] = {max:max, items:items};
+                } catch(e) {
+                    results.listHand["p"+p] = {error:e.message};
+                }
+            }
+        }
+
+        // Search known UIDs
+        if (searchByUID) {
+            results.searchUID = {};
+            var knownUIDs = [1,2,3,4,5,6,7,8,9,10,23];
+            for (var ui = 0; ui < knownUIDs.length; ui++) {
+                try {
+                    var r = callCardFn(searchByUID, [boxInt32(knownUIDs[ui])]);
+                    if (r !== 0) results.searchUID["uid" + knownUIDs[ui]] = r;
+                } catch(e) {}
+            }
+        }
+
+        // HandCardOpen
+        if (getHandOpen) {
+            results.handOpen = {};
+            for (var p = 0; p <= 1; p++) {
+                var opens = [];
+                for (var i = 0; i < 10; i++) {
+                    try {
+                        var r = callCardFn(getHandOpen, [boxInt32(p), boxInt32(i)]);
+                        opens.push(r);
+                    } catch(e) { break; }
+                }
+                results.handOpen["p"+p] = opens;
+            }
+        }
+
+        // IsThisCardExist for various zones
+        if (isCardExist) {
+            results.cardExist = {};
+            for (var p = 0; p <= 1; p++) {
+                var exists = {};
+                for (var ti = 0; ti < testVals.length; ti++) {
+                    var zv = testVals[ti];
+                    try {
+                        var r = callCardFn(isCardExist, [boxInt32(p), boxInt32(zv)]);
+                        if (r !== 0) exists["z" + zv] = r;
+                    } catch(e) {}
+                }
+                if (Object.keys(exists).length > 0) results.cardExist["p"+p] = exists;
+            }
+        }
+
+        // TopCardIndex
+        if (topCard) {
+            results.topCard = {};
+            for (var p = 0; p <= 1; p++) {
+                var tops = {};
+                for (var zv = 0; zv <= 8; zv++) {
+                    try {
+                        var r = callCardFn(topCard, [boxInt32(p), boxInt32(zv)]);
+                        if (r !== 0 && r !== -1) tops["z" + zv] = r;
+                    } catch(e) {}
+                }
+                if (Object.keys(tops).length > 0) results.topCard["p"+p] = tops;
+            }
+        }
+
+        return results;
+    },
+
+    /**
+     * Enumerate all methods on YgomGame.Duel.Engine class.
+     * Optionally filter by prefix (default: "DLL_DuelCom" to find action methods).
+     * Returns {methods: [{name, paramCount, params: [{name, type}], returnType, isStatic}]}.
+     */
+    enumEngine: function (prefix) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var filter = (prefix !== undefined && prefix !== null) ? prefix : "DLL_DuelCom";
+        var methods = [];
+        var iter = Memory.alloc(Process.pointerSize);
+        iter.writePointer(ptr(0));
+
+        while (true) {
+            var method = il2cpp_class_get_methods(engineKlass, iter);
+            if (method.isNull()) break;
+
+            var mName = readCStr(il2cpp_method_get_name(method));
+            if (filter && mName.indexOf(filter) !== 0) continue;
+
+            var paramCount = il2cpp_method_get_param_count(method);
+            var params = [];
+            for (var p = 0; p < paramCount; p++) {
+                var pName = readCStr(il2cpp_method_get_param_name(method, p));
+                var pType = il2cpp_method_get_param(method, p);
+                var pTypeName = readCStr(il2cpp_type_get_name(pType));
+                params.push({ name: pName, type: pTypeName });
+            }
+
+            var retType = il2cpp_method_get_return_type(method);
+            var retTypeName = readCStr(il2cpp_type_get_name(retType));
+
+            var isStatic = false;
+            if (il2cpp_method_get_flags) {
+                try {
+                    var flags = il2cpp_method_get_flags(method, ptr(0));
+                    isStatic = !!(flags & METHOD_ATTRIBUTE_STATIC);
+                } catch (e) {}
+            }
+
+            methods.push({
+                name: mName,
+                paramCount: paramCount,
+                params: params,
+                returnType: retTypeName,
+                isStatic: isStatic
+            });
+        }
+
+        return { methods: methods, count: methods.length, filter: filter };
+    },
+
+    /**
+     * Get complete game state snapshot for autopilot decision-making.
+     * Returns {myself, rival, myLP, rivalLP, turnPlayer, phase, turnNum,
+     *          myHand, rivalHand, myField, rivalField, myGY, rivalGY, myDeck, rivalDeck}.
+     */
+    gameState: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+        var inst = getStaticFieldPtr(engineKlass, "s_instance");
+        if (!inst || inst.isNull()) return { error: "No duel active" };
+
+        var online = isOnlineMode();
+
+        // Resolve card methods (try both sets)
+        resolveCardMethods();
+        resolvePvpCardMethods();
+
+        var myself = 0, rival = 1;
+        if (online) {
+            // In PvP, detect correct player index by cross-referencing
+            // DLL_ (engine: always "us" = 0) with PVP_ card counts
+            var detected = detectPvpMyselfIndex();
+            if (detected >= 0) {
+                myself = detected;
+                rival = detected === 0 ? 1 : 0;
+            }
+        } else {
+            try {
+                if (_duelMyselfFn) myself = _duelMyselfFn(ptr(0));
+                if (_duelRivalFn) rival = _duelRivalFn(ptr(0));
+            } catch (e) {}
+        }
+        if (myself < 0 || myself > 1) myself = 0;
+        if (rival < 0 || rival > 1) rival = 1;
+
+        // LP — try PVP_ first if online, then native XOR, then DLL_ fallback
+        var myLP = 0, rivalLP = 0;
+        if (_pvpTurnMI && _pvpTurnMI.getLP) {
+            try {
+                myLP = callCardFn(_pvpTurnMI.getLP, [boxInt32(myself)]);
+                rivalLP = callCardFn(_pvpTurnMI.getLP, [boxInt32(rival)]);
+            } catch (e) {}
+            if (myLP > 0 || rivalLP > 0) {
+                online = true;  // confirmed PvP
+                _isOnlineCache = true;
+            }
+        }
+        if (myLP === 0 && rivalLP === 0) {
+            // Try native XOR (solo mode)
+            try {
+                if (resolveNativeLP()) {
+                    var xorKey = readXorKey();
+                    var basePtr = readBasePtr();
+                    myLP = xorKey ^ basePtr.add(myself * PLAYER_STRIDE).readS32();
+                    rivalLP = xorKey ^ basePtr.add(rival * PLAYER_STRIDE).readS32();
+                }
+            } catch (e) {}
+        }
+
+        // Pick card method set based on detected mode
+        var activeMI = online ? _pvpCardMI : _cardMI;
+        if (!activeMI) activeMI = _pvpCardMI || _cardMI;
+        if (!activeMI) return { error: "Could not resolve any card methods" };
+
+        // Turn/Phase info — try PVP_ first, fall back to DLL_
+        var turnPlayer = -1, phase = -1, turnNum = -1;
+        if (_pvpTurnMI) {
+            try {
+                if (_pvpTurnMI.whichTurn) turnPlayer = callCardFn(_pvpTurnMI.whichTurn, []);
+                if (_pvpTurnMI.getPhase) phase = callCardFn(_pvpTurnMI.getPhase, []);
+                if (_pvpTurnMI.getTurnNum) turnNum = callCardFn(_pvpTurnMI.getTurnNum, []);
+            } catch (e) {}
+        }
+        if (turnNum <= 0) {
+            // Fallback to DLL_
+            try {
+                var whichTurn = findMethodByName(engineKlass, "DLL_DuelWhichTurnNow", -1);
+                var getPhase = findMethodByName(engineKlass, "DLL_DuelGetCurrentPhase", -1);
+                var getTurnNum = findMethodByName(engineKlass, "DLL_DuelGetTurnNum", -1);
+                if (whichTurn) { var v = callCardFn(whichTurn, []); if (v >= 0) turnPlayer = v; }
+                if (getPhase) { var v = callCardFn(getPhase, []); if (v >= 0) phase = v; }
+                if (getTurnNum) { var v = callCardFn(getTurnNum, []); if (v > 0) turnNum = v; }
+            } catch (e) {}
+        }
+
+        // Helper: collect cards in a zone range
+        function zoneCards(player, zoneVal, label) {
+            return getCardsInZone(player, zoneVal, label, activeMI);
+        }
+
+        // ── MY side ──
+        var myHand = zoneCards(myself, ZONE_HAND, "H");
+
+        // Sanity check: if our hand has cards but ALL cardIds are 0,
+        // we likely have the player index wrong (reading opponent's face-down hand).
+        // Swap and retry.
+        if (myHand.length > 0) {
+            var allZero = true;
+            for (var hi = 0; hi < myHand.length; hi++) {
+                if (myHand[hi].cardId > 0) { allZero = false; break; }
+            }
+            if (allZero) {
+                var swapped = myself === 0 ? 1 : 0;
+                var testHand = zoneCards(swapped, ZONE_HAND, "H");
+                var testHasIds = false;
+                for (var hi = 0; hi < testHand.length; hi++) {
+                    if (testHand[hi].cardId > 0) { testHasIds = true; break; }
+                }
+                if (testHasIds) {
+                    send("gameState: player index was wrong (" + myself + "), swapping to " + swapped);
+                    myself = swapped;
+                    rival = swapped === 0 ? 1 : 0;
+                    _pvpMyselfIndex = myself;
+                    myHand = testHand;
+                }
+            }
+        }
+
+        var myMonsters = [];
+        for (var z = ZONE_MONSTER_START; z <= ZONE_MONSTER_END; z++) {
+            myMonsters = myMonsters.concat(zoneCards(myself, z, "M" + z));
+        }
+        var myExtraMonsters = [];
+        for (var z = ZONE_EXTRA_MONSTER_1; z <= ZONE_EXTRA_MONSTER_2; z++) {
+            myExtraMonsters = myExtraMonsters.concat(zoneCards(myself, z, "EM" + (z - ZONE_EXTRA_MONSTER_1 + 1)));
+        }
+        var mySpells = [];
+        for (var z = ZONE_SPELL_START; z <= ZONE_SPELL_END; z++) {
+            mySpells = mySpells.concat(zoneCards(myself, z, "S" + (z - ZONE_SPELL_START + 1)));
+        }
+        var myGY = zoneCards(myself, ZONE_GRAVE, "GY");
+        var myDeckCount = 0;
+        try { myDeckCount = callCardFn(activeMI.getCardNum, [boxInt32(myself), boxInt32(15)]); } catch (e) {}
+        var myExtraDeckCount = 0;
+        try { myExtraDeckCount = callCardFn(activeMI.getCardNum, [boxInt32(myself), boxInt32(14)]); } catch (e) {}
+
+        // ── RIVAL side ──
+        var rivalHand = zoneCards(rival, ZONE_HAND, "H");
+        var rivalMonsters = [];
+        for (var z = ZONE_MONSTER_START; z <= ZONE_MONSTER_END; z++) {
+            rivalMonsters = rivalMonsters.concat(zoneCards(rival, z, "M" + z));
+        }
+        var rivalExtraMonsters = [];
+        for (var z = ZONE_EXTRA_MONSTER_1; z <= ZONE_EXTRA_MONSTER_2; z++) {
+            rivalExtraMonsters = rivalExtraMonsters.concat(zoneCards(rival, z, "EM" + (z - ZONE_EXTRA_MONSTER_1 + 1)));
+        }
+        var rivalSpells = [];
+        for (var z = ZONE_SPELL_START; z <= ZONE_SPELL_END; z++) {
+            rivalSpells = rivalSpells.concat(zoneCards(rival, z, "S" + (z - ZONE_SPELL_START + 1)));
+        }
+        var rivalGY = zoneCards(rival, ZONE_GRAVE, "GY");
+        var rivalDeckCount = 0;
+        try { rivalDeckCount = callCardFn(activeMI.getCardNum, [boxInt32(rival), boxInt32(15)]); } catch (e) {}
+
+        // Banished zones (z17)
+        var myBanished = zoneCards(myself, 17, "BN");
+        var rivalBanished = zoneCards(rival, 17, "BN");
+
+        return {
+            myself: myself,
+            rival: rival,
+            myLP: myLP,
+            rivalLP: rivalLP,
+            turnPlayer: turnPlayer,
+            phase: phase,
+            turnNum: turnNum,
+            online: online,
+            myHand: myHand,
+            rivalHand: rivalHand,
+            myField: {
+                monsters: myMonsters,
+                spells: mySpells,
+                extraMonsters: myExtraMonsters
+            },
+            rivalField: {
+                monsters: rivalMonsters,
+                spells: rivalSpells,
+                extraMonsters: rivalExtraMonsters
+            },
+            myGY: myGY,
+            rivalGY: rivalGY,
+            myBanished: myBanished,
+            rivalBanished: rivalBanished,
+            myDeckCount: myDeckCount,
+            myExtraDeckCount: myExtraDeckCount,
+            rivalDeckCount: rivalDeckCount
+        };
+    },
+
+    /**
+     * Generic Engine method caller.
+     * Calls any static DLL_Duel* method by name with int args.
+     * Returns {result: int|null, error: string|null}.
+     */
+    callEngine: function (methodName, intArgs) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var paramCount = (intArgs && intArgs.length) || 0;
+        var method = findMethodByName(engineKlass, methodName, paramCount);
+        if (!method) {
+            method = findMethodByName(engineKlass, methodName, -1);
+            if (!method) return { error: "Method not found: " + methodName };
+        }
+
+        var args = [];
+        if (intArgs) {
+            for (var i = 0; i < intArgs.length; i++) {
+                args.push(boxInt32(intArgs[i]));
+            }
+        }
+
+        try {
+            var result = invokeStatic(method, args);
+            if (result && !result.isNull()) {
+                try { return { result: result.add(0x10).readS32() }; }
+                catch (e) { return { result: 0 }; }
+            }
+            return { result: null };
+        } catch (e) {
+            return { error: "invoke failed: " + e.message };
+        }
+    },
+
+    /**
+     * Scan all zones for command masks on each card.
+     * Returns {commands: [{zone, index, mask, cardId, name, uid}],
+     *          movablePhases, phase, turnPlayer, myself}.
+     */
+    getCommands: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+        var inst = getStaticFieldPtr(engineKlass, "s_instance");
+        if (!inst || inst.isNull()) return { error: "No duel active" };
+
+        var activeMI = getActiveCardMI();
+        if (!activeMI) return { error: "Card methods not resolved" };
+        resolveNativeLP();
+
+        var online = isOnlineMode();
+        var pvpCmd = online ? resolvePvpCommandMethods() : null;
+
+        // Resolve command methods — try PVP_ first when online
+        var getCmdMask = (pvpCmd && pvpCmd["PVP_DuelComGetCommandMask"])
+            ? pvpCmd["PVP_DuelComGetCommandMask"]
+            : findMethodByName(engineKlass, "DLL_DuelComGetCommandMask", -1);
+        var getMovable = (pvpCmd && pvpCmd["PVP_DuelComGetMovablePhase"])
+            ? pvpCmd["PVP_DuelComGetMovablePhase"]
+            : findMethodByName(engineKlass, "DLL_DuelComGetMovablePhase", -1);
+        if (!getCmdMask) return { error: "ComGetCommandMask not found" };
+
+        // ── Phase info FIRST — needed to determine correct player index ──
+        var phase = -1, turnPlayer = -1, movablePhases = 0;
+        try {
+            var getPhase, whichTurn;
+            if (online && _pvpTurnMI) {
+                getPhase = _pvpTurnMI.getPhase;
+                whichTurn = _pvpTurnMI.whichTurn;
+            } else {
+                getPhase = findMethodByName(engineKlass, "DLL_DuelGetCurrentPhase", -1);
+                whichTurn = findMethodByName(engineKlass, "DLL_DuelWhichTurnNow", -1);
+            }
+            if (getPhase) phase = callCardFn(getPhase, []);
+            if (whichTurn) turnPlayer = callCardFn(whichTurn, []);
+            if (getMovable) movablePhases = callCardFn(getMovable, []);
+        } catch (e) {}
+
+        // ── Determine correct player index ──
+        var myself = 0;
+        try { if (_duelMyselfFn) myself = _duelMyselfFn(ptr(0)); } catch (e) {}
+
+        // In PvP, DLL_DuelMyself() may return wrong value.
+        // Use cached PvP index if available.
+        if (online && _pvpMyselfIndex !== null) {
+            myself = _pvpMyselfIndex;
+        }
+        // If movablePhases > 0, WE are the active player, so myself = turnPlayer.
+        if (online && turnPlayer >= 0 && movablePhases > 0 && turnPlayer !== myself) {
+            myself = turnPlayer;
+            _pvpMyselfIndex = myself;  // Cache for gameState and future calls
+        }
+
+        var commands = [];
+
+        // Scan: hand(13), monsters(1-5), spells(6-10), extra monsters(11-12)
+        var scanZones = [13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        for (var zi = 0; zi < scanZones.length; zi++) {
+            var zv = scanZones[zi];
+            var cardCount = callCardFn(activeMI.getCardNum, [boxInt32(myself), boxInt32(zv)]);
+            for (var ci = 0; ci < cardCount && ci < 20; ci++) {
+                try {
+                    var mask = callCardFn(getCmdMask, [boxInt32(myself), boxInt32(zv), boxInt32(ci)]);
+                    if (mask !== 0) {
+                        var uid = callCardFn(activeMI.getCardUID, [boxInt32(myself), boxInt32(zv), boxInt32(ci)]);
+                        var cardId = 0, name = null;
+                        if (uid > 0) {
+                            cardId = callCardFn(activeMI.getCardIDByUID, [boxInt32(uid)]);
+                            if (cardId > 0) name = getCardName(cardId);
+                        }
+                        commands.push({
+                            zone: zv, index: ci,
+                            mask: mask, cardId: cardId,
+                            name: name, uid: uid
+                        });
+                    }
+                } catch (e) {}
+            }
+        }
+
+        return {
+            commands: commands,
+            count: commands.length,
+            movablePhases: movablePhases,
+            phase: phase,
+            turnPlayer: turnPlayer,
+            myself: myself,
+            online: online
+        };
+    },
+
+    /**
+     * Execute a command using managed ComDoCommand on the Unity main thread.
+     * This is the correct way to submit player actions.
+     * Params: player, zone, index, commandBit (int for CommandType enum)
+     */
+    doCommand: function (player, zone, index, commandBit) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        // Try PVP_ variant first when online
+        var pvpCmd = isOnlineMode() ? resolvePvpCommandMethods() : null;
+        if (pvpCmd && pvpCmd["PVP_ComDoCommand"]) {
+            try {
+                var result = runOnMainThread(function () {
+                    invokeStatic(pvpCmd["PVP_ComDoCommand"], [
+                        boxInt32(player), boxInt32(zone),
+                        boxInt32(index), boxInt32(commandBit)
+                    ]);
+                    return "ok";
+                });
+                return { success: true, method: "PVP_ComDoCommand", result: result };
+            } catch (e) {
+                // Fall through to managed variants
+            }
+        }
+
+        // Find the managed ComDoCommand (5 params: player, position, index, CommandType, bool)
+        var comDoCmd = findMethodByName(engineKlass, "ComDoCommand", 5);
+        if (!comDoCmd) {
+            // Try THREAD_ variant as fallback
+            comDoCmd = findMethodByName(engineKlass, "THREAD_ComDoCommand", 4);
+            if (!comDoCmd) return { error: "ComDoCommand not found" };
+
+            // THREAD_ variant: (player, position, index, commandId) — 4 int params
+            try {
+                var result = runOnMainThread(function () {
+                    invokeStatic(comDoCmd, [
+                        boxInt32(player), boxInt32(zone),
+                        boxInt32(index), boxInt32(commandBit)
+                    ]);
+                    return "ok";
+                });
+                return { success: true, method: "THREAD_ComDoCommand", result: result };
+            } catch (e) {
+                return { error: "THREAD_ComDoCommand failed: " + e.message };
+            }
+        }
+
+        // Managed ComDoCommand(player, position, index, CommandType commandId, bool checkCommand)
+        try {
+            var result = runOnMainThread(function () {
+                invokeStatic(comDoCmd, [
+                    boxInt32(player), boxInt32(zone),
+                    boxInt32(index), boxInt32(commandBit),
+                    boxBool(false)  // checkCommand = false (skip validation, just do it)
+                ]);
+                return "ok";
+            });
+            return { success: true, method: "ComDoCommand", result: result };
+        } catch (e) {
+            return { error: "ComDoCommand failed: " + e.message };
+        }
+    },
+
+    /**
+     * Move to a duel phase using managed ComMovePhase on main thread.
+     */
+    movePhase: function (phase) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var comMovePhase = findMethodByName(engineKlass, "ComMovePhase", 1);
+        if (!comMovePhase) {
+            comMovePhase = findMethodByName(engineKlass, "THREAD_ComMovePhase", 1);
+            if (!comMovePhase) return { error: "ComMovePhase not found" };
+        }
+
+        try {
+            var result = runOnMainThread(function () {
+                invokeStatic(comMovePhase, [boxInt32(phase)]);
+                return "ok";
+            });
+            return { success: true };
+        } catch (e) {
+            return { error: "ComMovePhase failed: " + e.message };
+        }
+    },
+
+    /**
+     * Cancel/pass current command using managed ComCancelCommand on main thread.
+     */
+    cancelCommand: function (decide) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var comCancel = findMethodByName(engineKlass, "ComCancelCommand", 1);
+        if (!comCancel) {
+            comCancel = findMethodByName(engineKlass, "THREAD_ComCancelCommand", 1);
+            if (!comCancel) return { error: "ComCancelCommand not found" };
+        }
+
+        try {
+            var result = runOnMainThread(function () {
+                invokeStatic(comCancel, [boxBool(decide !== false)]);
+                return "ok";
+            });
+            return { success: true };
+        } catch (e) {
+            return { error: "ComCancelCommand failed: " + e.message };
+        }
+    },
+
+    /**
+     * Submit a dialog result (yes/no, position select, etc.) on main thread.
+     * result: uint32 value (e.g., 1=Yes, 0=No, or position mask)
+     */
+    dialogSetResult: function (result) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        // Try PVP_ variant first when online
+        var pvpCmd = isOnlineMode() ? resolvePvpCommandMethods() : null;
+        var dlgSetResult = (pvpCmd && pvpCmd["PVP_DuelDlgSetResult"])
+            ? pvpCmd["PVP_DuelDlgSetResult"]
+            : null;
+
+        if (!dlgSetResult) {
+            dlgSetResult = findMethodByName(engineKlass, "DialogSetResult", 1);
+            if (!dlgSetResult) {
+                dlgSetResult = findMethodByName(engineKlass, "THREAD_DuelDlgSetResult", 1);
+                if (!dlgSetResult) return { error: "DialogSetResult not found" };
+            }
+        }
+
+        try {
+            runOnMainThread(function () {
+                invokeStatic(dlgSetResult, [boxInt32(result)]);
+                return "ok";
+            });
+            return { success: true };
+        } catch (e) {
+            return { error: "DialogSetResult failed: " + e.message };
+        }
+    },
+
+    /**
+     * Select an item from a list (target selection, materials, etc.) on main thread.
+     */
+    listSendIndex: function (index) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        // Try PVP_ variant first when online
+        var pvpCmd = isOnlineMode() ? resolvePvpCommandMethods() : null;
+        var listSend = (pvpCmd && pvpCmd["PVP_DuelListSendIndex"])
+            ? pvpCmd["PVP_DuelListSendIndex"]
+            : null;
+
+        if (!listSend) {
+            listSend = findMethodByName(engineKlass, "ListSendIndex", 1);
+            if (!listSend) {
+                listSend = findMethodByName(engineKlass, "THREAD_ListSendIndex", 1);
+                if (!listSend) return { error: "ListSendIndex not found" };
+            }
+        }
+
+        try {
+            runOnMainThread(function () {
+                invokeStatic(listSend, [boxInt32(index)]);
+                return "ok";
+            });
+            return { success: true };
+        } catch (e) {
+            return { error: "ListSendIndex failed: " + e.message };
+        }
+    },
+
+    /**
+     * Get current input/dialog/list state for the autopilot to make decisions.
+     * Returns what kind of input the engine is waiting for.
+     */
+    getInputState: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var online = isOnlineMode();
+        var pvpCmd = online ? resolvePvpCommandMethods() : null;
+        var state = {};
+
+        // Helper: pick PVP_ method if available, else fall back to managed name
+        function pickMethod(pvpName, managedName, paramCount) {
+            if (pvpCmd && pvpCmd[pvpName]) return pvpCmd[pvpName];
+            return findMethodByName(engineKlass, managedName, paramCount);
+        }
+
+        // Helper: read bool from invokeStatic result
+        function readBool(method) {
+            var r = invokeStatic(method, []);
+            return (r && !r.isNull()) ? !!r.add(0x10).readU8() : false;
+        }
+
+        // Check if input is active
+        try {
+            var getInputNow = findMethodByName(engineKlass, "get_InputNow", 0);
+            if (getInputNow) state.inputNow = readBool(getInputNow);
+        } catch (e) { state.inputNow = null; }
+
+        // Check SysAct loop status
+        try {
+            var isSysActLoop = pickMethod("PVP_IsSysActLoopExecute", "IsSysActLoopExecute", 0);
+            if (isSysActLoop) state.sysActLoop = readBool(isSysActLoop);
+        } catch (e) { state.sysActLoop = null; }
+
+        // Dialog state
+        try {
+            var dlgSelectNum = pickMethod("PVP_DuelDlgGetSelectItemNum", "DialogGetSelectItemNum", 0);
+            if (dlgSelectNum) state.dialogSelectNum = callCardFn(dlgSelectNum, []);
+        } catch (e) { state.dialogSelectNum = 0; }
+
+        try {
+            var dlgCanSkip = pickMethod("PVP_DuelDlgCanYesNoSkip", "DialogCanYesNoSkip", 0);
+            if (dlgCanSkip) state.dialogCanSkip = readBool(dlgCanSkip);
+        } catch (e) { state.dialogCanSkip = null; }
+
+        try {
+            var dlgPosMask = pickMethod("PVP_DuelDlgGetPosMaskOfThisSummon", "DialogGetPosMaskOfThisSummon", 0);
+            if (dlgPosMask) state.dialogPosMask = callCardFn(dlgPosMask, []);
+        } catch (e) { state.dialogPosMask = 0; }
+
+        // List state
+        try {
+            var listMax = pickMethod("PVP_DuelListGetItemMax", "ListGetItemMax", 0);
+            if (listMax) state.listItemMax = callCardFn(listMax, []);
+        } catch (e) { state.listItemMax = 0; }
+
+        try {
+            var listMulti = pickMethod("PVP_DuelListIsMultiMode", "ListIsMultiMode", 0);
+            if (listMulti) state.listMultiMode = readBool(listMulti);
+        } catch (e) { state.listMultiMode = false; }
+
+        try {
+            var listSelMax = pickMethod("PVP_DuelListGetSelectMax", "ListGetSelectMax", 0);
+            var listSelMin = pickMethod("PVP_DuelListGetSelectMin", "ListGetSelectMin", 0);
+            if (listSelMax) state.listSelectMax = callCardFn(listSelMax, []);
+            if (listSelMin) state.listSelectMin = callCardFn(listSelMin, []);
+        } catch (e) {}
+
+        // Get list item details if list is active
+        if (state.listItemMax > 0) {
+            state.listItems = [];
+            var listGetItemID = pickMethod("PVP_DuelListGetItemID", "ListGetItemID", 1);
+            var listGetItemUID = pickMethod("PVP_DuelListGetItemUniqueID", "ListGetItemUniqueID", 1);
+            var listGetItemFrom = pickMethod("PVP_DuelListGetItemFrom", "ListGetItemFrom", 1);
+            for (var i = 0; i < state.listItemMax && i < 30; i++) {
+                var item = { index: i };
+                try {
+                    if (listGetItemID) item.cardId = callCardFn(listGetItemID, [boxInt32(i)]);
+                    if (listGetItemUID) item.uid = callCardFn(listGetItemUID, [boxInt32(i)]);
+                    if (listGetItemFrom) item.from = callCardFn(listGetItemFrom, [boxInt32(i)]);
+                    if (item.cardId > 0) item.name = getCardName(item.cardId);
+                } catch (e) {}
+                state.listItems.push(item);
+            }
+        }
+
+        // Get dialog mix data if present
+        try {
+            var dlgMixNum = pickMethod("PVP_DuelDlgGetMixNum", "DialogGetMixNum", 0);
+            if (dlgMixNum) state.dialogMixNum = callCardFn(dlgMixNum, []);
+        } catch (e) { state.dialogMixNum = 0; }
+
+        return state;
+    },
+
+    /**
+     * Auto-select default location on main thread.
+     */
+    defaultLocation: function () {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var defLoc = findMethodByName(engineKlass, "DLL_DuelComDefaultLocation", 0);
+        if (!defLoc) return { error: "DLL_DuelComDefaultLocation not found" };
+
+        try {
+            runOnMainThread(function () {
+                invokeStatic(defLoc, []);
+                return "ok";
+            });
+            return { success: true };
+        } catch (e) {
+            return { error: "DefaultLocation failed: " + e.message };
+        }
+    },
+
+    /**
+     * Enable/disable AI auto-play by hooking DLL_DuelSetPlayerType in duel.dll.
+     * Uses the same approach as the CE "AI vs AI" script:
+     * Intercepts calls to SetPlayerType and forces the type to 1 (CPU).
+     * This is safe because it hooks at the native level and only modifies
+     * the argument when the game naturally calls the function.
+     *
+     * enable=true:  force all SetPlayerType calls to write 1 (CPU)
+     * enable=false: remove the hook, restore original behavior
+     */
+    hookAutoplay: function (enable) {
+        return _hookAutoplay(enable);
+    },
+
+    /**
+     * Check if a player is Human by reading native duel engine memory directly.
+     * DLL_DuelIsHuman reads: base_ptr[player*4+8] == 0 ? true : false
+     * Player type 0 = Human, type != 0 = CPU
+     */
+    isPlayerHuman: function (player) {
+        return _readPlayerType(player);
+    },
+
+    /**
+     * Call ComMovePhase via direct native function call (like CE script does).
+     * Gets the compiled native address of the method and calls it directly
+     * instead of going through il2cpp_runtime_invoke.
+     */
+    nativeMovePhase: function (phase) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var methodInfo = findMethodByName(engineKlass, "ComMovePhase", 1);
+        if (!methodInfo) return { error: "ComMovePhase not found" };
+
+        try {
+            // Read the native function pointer from MethodInfo
+            // In IL2CPP, MethodInfo->methodPointer is at offset 0
+            var nativeAddr = methodInfo.readPointer();
+            if (nativeAddr.isNull()) return { error: "Native addr is null" };
+
+            // IL2CPP static method signature: void ComMovePhase(int phase, MethodInfo* method)
+            var nativeFn = new NativeFunction(nativeAddr, "void", ["int32", "pointer"]);
+            nativeFn(phase, methodInfo);
+            return { success: true, addr: nativeAddr.toString() };
+        } catch (e) {
+            return { error: "nativeMovePhase failed: " + e.message };
+        }
+    },
+
+    /**
+     * Call ComDoCommand via direct native function call.
+     */
+    nativeDoCommand: function (player, zone, index, commandBit, checkCommand) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var methodInfo = findMethodByName(engineKlass, "ComDoCommand", 5);
+        if (!methodInfo) return { error: "ComDoCommand not found" };
+
+        try {
+            var nativeAddr = methodInfo.readPointer();
+            if (nativeAddr.isNull()) return { error: "Native addr is null" };
+
+            // void ComDoCommand(int player, int position, int index, int commandId, bool checkCommand, MethodInfo* method)
+            var nativeFn = new NativeFunction(nativeAddr, "void", ["int32", "int32", "int32", "int32", "uint8", "pointer"]);
+            nativeFn(player, zone, index, commandBit, checkCommand ? 1 : 0, methodInfo);
+            return { success: true, addr: nativeAddr.toString() };
+        } catch (e) {
+            return { error: "nativeDoCommand failed: " + e.message };
+        }
+    },
+
+    /**
+     * Call ComCancelCommand via direct native function call.
+     */
+    nativeCancelCommand: function (decide) {
+        var domain = il2cpp_domain_get();
+        il2cpp_thread_attach(domain);
+
+        var engineKlass = findEngineClass();
+        if (!engineKlass) return { error: "Engine class not found" };
+
+        var methodInfo = findMethodByName(engineKlass, "ComCancelCommand", 1);
+        if (!methodInfo) return { error: "ComCancelCommand not found" };
+
+        try {
+            var nativeAddr = methodInfo.readPointer();
+            if (nativeAddr.isNull()) return { error: "Native addr is null" };
+
+            // void ComCancelCommand(bool decide, MethodInfo* method)
+            var nativeFn = new NativeFunction(nativeAddr, "void", ["uint8", "pointer"]);
+            nativeFn(decide ? 1 : 0, methodInfo);
+            return { success: true };
+        } catch (e) {
+            return { error: "nativeCancelCommand failed: " + e.message };
+        }
     }
 };
+
+// ── AI vs AI: Hook DLL_DuelSetPlayerType in duel.dll ──
+// Same approach as CE "AI vs AI" script: intercept SetPlayerType and force type=1 (CPU)
+var _autoplayHooked = false;
+var _autoplayEnabled = false;
+var _autoplayInterceptor = null;
+
+function _hookAutoplay(enable) {
+    if (enable && !_autoplayHooked) {
+        // Find DLL_DuelSetPlayerType in duel.dll
+        try {
+            var duelDll = Process.getModuleByName("duel.dll");
+            var setPlayerTypeAddr = duelDll.findExportByName("DLL_DuelSetPlayerType");
+            if (!setPlayerTypeAddr) {
+                return { error: "DLL_DuelSetPlayerType not found in duel.dll" };
+            }
+
+            // Hook the function — when autopilot is on, force args[1] (playerType) to 1 (CPU)
+            _autoplayInterceptor = Interceptor.attach(setPlayerTypeAddr, {
+                onEnter: function (args) {
+                    if (_autoplayEnabled) {
+                        args[1] = ptr(1); // Force type=1 (CPU) for ALL players
+                    }
+                }
+            });
+            _autoplayHooked = true;
+            send("autoplay: hook installed on DLL_DuelSetPlayerType");
+        } catch (e) {
+            return { error: "Hook failed: " + e.message };
+        }
+    }
+
+    _autoplayEnabled = enable;
+
+    if (enable) {
+        // The hook will automatically force CPU type on the NEXT SetPlayerType call.
+        // If a duel is already active, try to set type directly via native call.
+        // If no duel active (global ptr is null), skip the direct call — the hook
+        // will catch it when the duel starts.
+        try {
+            var duelDll = Process.getModuleByName("duel.dll");
+            var isHumanAddr = duelDll.findExportByName("DLL_DuelIsHuman");
+            if (isHumanAddr) {
+                var isHumanFn = new NativeFunction(isHumanAddr, "int32", ["int32"]);
+                // Test if duel is active by reading player type (will AV if no duel)
+                isHumanFn(0);
+                // If we get here, duel is active — set both players to CPU
+                var setTypeAddr = duelDll.findExportByName("DLL_DuelSetPlayerType");
+                if (setTypeAddr) {
+                    var setTypeFn = new NativeFunction(setTypeAddr, "void", ["int32", "int32"]);
+                    setTypeFn(0, 1); // player 0 -> CPU
+                    setTypeFn(1, 1); // player 1 -> CPU
+                    send("autoplay: both players set to CPU");
+                }
+            }
+        } catch (e) {
+            // No duel active — hook will catch it when duel starts
+            send("autoplay: hook ready, will activate on next duel start");
+        }
+        return { success: true, enabled: true };
+    } else {
+        // Disable: try to restore player 0 to Human
+        try {
+            var duelDll = Process.getModuleByName("duel.dll");
+            var setTypeAddr = duelDll.findExportByName("DLL_DuelSetPlayerType");
+            if (setTypeAddr) {
+                var setTypeFn = new NativeFunction(setTypeAddr, "void", ["int32", "int32"]);
+                setTypeFn(0, 0); // player 0 -> Human
+            }
+        } catch (e) {
+            // No duel active — nothing to restore
+        }
+        return { success: true, enabled: false };
+    }
+}
+
+function _readPlayerType(player) {
+    try {
+        var duelDll = Process.getModuleByName("duel.dll");
+        var isHumanAddr = duelDll.findExportByName("DLL_DuelIsHuman");
+        if (!isHumanAddr) return { error: "DLL_DuelIsHuman not found" };
+
+        var isHumanFn = new NativeFunction(isHumanAddr, "int32", ["int32"]);
+        var result = isHumanFn(player);
+        return { isHuman: result !== 0, player: player };
+    } catch (e) {
+        return { error: "DLL_DuelIsHuman failed: " + e.message };
+    }
+}
 
 // ── Helper: poll Handle for completion ──
 

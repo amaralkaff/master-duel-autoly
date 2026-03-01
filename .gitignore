@@ -32,3 +32,7 @@ Desktop.ini
 
 # CLAUDE
 CLAUDE.md
+
+# Debug / diagnostic scripts
+diag_pvp.py
+*.class

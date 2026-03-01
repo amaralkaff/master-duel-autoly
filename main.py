@@ -1,4 +1,4 @@
-"""Master Duel Bot -- TUI entry point with instant win toggle."""
+"""Master Duel Bot -- TUI entry point with autopilot, instant win, reveal, AI assist."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from config import (
     WINDOW_TITLE,
     STOP_HOTKEY,
     HOTKEY_INSTANT_WIN,
+    HOTKEY_AUTOPILOT,
+    HOTKEY_REVEAL,
+    HOTKEY_ASSIST,
     HOTKEY_WIN_NOW,
     SCAN_INTERVAL,
 )
@@ -19,12 +22,18 @@ from memory.frida_il2cpp import FridaIL2CPP
 from window.background_input import find_window
 from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
-from ui.dashboard import Dashboard
+from ui.gui_main import run_gui
+from bot.autopilot import DuelAutopilot
+from bot.gemini_advisor import GeminiAdvisor
 from utils import logger
 
 
-def bot_worker(frida_session: FridaIL2CPP, state: BotState) -> None:
-    """Background thread: monitors duel state and auto-fires instant win."""
+def bot_worker(
+    frida_session: FridaIL2CPP,
+    state: BotState,
+    autopilot: DuelAutopilot,
+) -> None:
+    """Background thread: monitors duel state, runs autopilot or instant win."""
     while not state.stop_event.is_set():
         try:
             if not frida_session.is_attached():
@@ -35,17 +44,23 @@ def bot_worker(frida_session: FridaIL2CPP, state: BotState) -> None:
                 state.stop_event.wait(SCAN_INTERVAL)
                 continue
 
-            if not state.instant_win_enabled:
+            # ── Autopilot mode (Solo only) ──
+            if state.autopilot_enabled:
+                try:
+                    autopilot.tick()
+                except Exception as exc:
+                    logger.error(f"Autopilot tick error: {exc}")
                 state.stop_event.wait(SCAN_INTERVAL)
                 continue
 
-            # Duel active + instant win enabled -> write LP=0
-            status = frida_session.get_duel_status()
-            if status:
-                rival = status.get("rival", 1)
-                rival_lp = status["lp"][rival]
-                if rival_lp > 0:
-                    frida_session.instant_win()
+            # ── Instant win mode ──
+            if state.instant_win_enabled:
+                status = frida_session.get_duel_status()
+                if status:
+                    rival = status.get("rival", 1)
+                    rival_lp = status["lp"][rival]
+                    if rival_lp > 0:
+                        frida_session.instant_win()
 
             state.stop_event.wait(0.5)
 
@@ -59,7 +74,7 @@ def main() -> None:
 
     # -- Shared state --
     state = BotState()
-    log_buf = TuiLogBuffer(maxlen=15)
+    log_buf = TuiLogBuffer()
 
     # Wire logger -> TUI log buffer
     logger.set_log_callback(log_buf.append)
@@ -80,10 +95,46 @@ def main() -> None:
         sys.exit(1)
     logger.ok("Frida IL2CPP session ready.")
 
+    # -- Create autopilot (Solo only) --
+    autopilot = DuelAutopilot(frida_session)
+
+    # -- Create Gemini advisor (F4 assist) --
+    advisor = GeminiAdvisor()
+
+    # -- Install in-game reveal hooks (reveal_enabled=True by default) --
+    if state.reveal_enabled:
+        if frida_session.hook_reveal(True):
+            logger.ok("In-game reveal hooks installed.")
+        else:
+            logger.warn("In-game reveal hooks failed (will still work in TUI).")
+
     # -- Register hotkeys --
     def on_toggle_iw():
         new = state.toggle_instant_win()
         logger.info(f"Instant Win: {'ON' if new else 'OFF'}")
+
+    def on_toggle_autopilot():
+        new = state.toggle_autopilot()
+        if new:
+            autopilot.enable()
+        else:
+            autopilot.disable()
+        logger.info(f"Autopilot: {'ON' if new else 'OFF'}")
+
+    def on_toggle_reveal():
+        new = state.toggle_reveal()
+        frida_session.hook_reveal(new)
+        logger.info(f"Reveal Cards: {'ON' if new else 'OFF'}")
+
+    # Assist callback — set by gui_main once window is ready
+    _assist_cb = [None]
+
+    def on_assist():
+        """Ask Gemini for strategic advice (F4 hotkey)."""
+        if _assist_cb[0]:
+            _assist_cb[0]()
+        else:
+            logger.info("AI Assist: GUI not ready yet")
 
     def on_win_now():
         logger.info("One-shot instant win triggered!")
@@ -96,24 +147,32 @@ def main() -> None:
         logger.warn(f"{STOP_HOTKEY} pressed -- shutting down...")
         state.stop_event.set()
 
-    keyboard.add_hotkey(HOTKEY_INSTANT_WIN, on_toggle_iw, suppress=True)
-    keyboard.add_hotkey(HOTKEY_WIN_NOW, on_win_now, suppress=True)
-    keyboard.add_hotkey(STOP_HOTKEY, on_quit, suppress=True)
+    keyboard.add_hotkey(HOTKEY_INSTANT_WIN, on_toggle_iw, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(HOTKEY_AUTOPILOT, on_toggle_autopilot, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(HOTKEY_REVEAL, on_toggle_reveal, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(HOTKEY_ASSIST, on_assist, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(HOTKEY_WIN_NOW, on_win_now, suppress=True, trigger_on_release=True)
+    keyboard.add_hotkey(STOP_HOTKEY, on_quit, suppress=True, trigger_on_release=True)
 
     # -- Start worker thread --
-    worker = threading.Thread(target=bot_worker, args=(frida_session, state), daemon=True)
+    worker = threading.Thread(
+        target=bot_worker,
+        args=(frida_session, state, autopilot),
+        daemon=True,
+    )
     worker.start()
 
-    # -- Start dashboard (blocks main thread) --
-    dashboard = Dashboard(frida_session, hwnd, state, log_buf)
-    logger.ok("Dashboard running. Press F1/F5/F12.")
+    # -- Start GUI (blocks main thread until window is closed) --
+    logger.ok("GUI starting. Press F1/F2/F3/F4/F5/F12.")
 
     try:
-        dashboard.run()
+        run_gui(frida_session, hwnd, state, log_buf, autopilot, advisor, _assist_cb)
     except KeyboardInterrupt:
         state.stop_event.set()
     finally:
         state.stop_event.set()
+        if autopilot.ai_active:
+            autopilot.disable()
         worker.join(timeout=3.0)
         frida_session.detach()
         keyboard.unhook_all()

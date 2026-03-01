@@ -116,6 +116,16 @@ class FridaIL2CPP:
         except Exception:
             return None
 
+    def diag_pvp(self) -> dict | None:
+        """Diagnostic: check Engine state and enumerate PVP_/THREAD_ methods."""
+        if not self._api:
+            return None
+        try:
+            return self._api.diagpvp()
+        except Exception as exc:
+            logger.error(f"diagPvp failed: {exc}")
+            return None
+
     def instant_win(self) -> bool:
         """Write 0 to opponent LP in XOR-obfuscated native memory."""
         if not self._api:
@@ -244,6 +254,221 @@ class FridaIL2CPP:
         except Exception as exc:
             logger.error(f"dismissAllDialogs RPC failed: {exc}")
             return False
+
+    # ── Game state & engine enumeration ──
+
+    def get_game_state(self) -> dict | None:
+        """Get complete game state snapshot (hand, field, GY, LP, phase, turn)."""
+        if not self._api:
+            return None
+        try:
+            result = self._api.game_state()
+            if "error" in result:
+                logger.error(f"gameState: {result['error']}")
+                return None
+            return result
+        except Exception as exc:
+            logger.error(f"gameState failed: {exc}")
+            return None
+
+    def enum_engine(self, prefix: str = "DLL_DuelCom") -> dict | None:
+        """Enumerate Engine methods, filtering by prefix (default: DLL_DuelCom*)."""
+        if not self._api:
+            return None
+        try:
+            result = self._api.enum_engine(prefix)
+            if "error" in result:
+                logger.error(f"enumEngine: {result['error']}")
+                return None
+            return result
+        except Exception as exc:
+            logger.error(f"enumEngine failed: {exc}")
+            return None
+
+    def call_engine(self, method_name: str, args: list[int] | None = None) -> dict | None:
+        """Call any Engine method by name with int args."""
+        if not self._api:
+            return None
+        try:
+            result = self._api.call_engine(method_name, args or [])
+            if result and "error" in result:
+                return None
+            return result
+        except Exception:
+            return None
+
+    def get_commands(self) -> dict | None:
+        """Get available player commands in current duel state."""
+        if not self._api:
+            return None
+        try:
+            result = self._api.get_commands()
+            if "error" in result:
+                return None
+            return result
+        except Exception:
+            return None
+
+    # ── Managed command methods (run on Unity main thread) ──
+
+    def do_command(self, player: int, zone: int, index: int, cmd_bit: int) -> dict | None:
+        """Execute a command via managed ComDoCommand on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.do_command(player, zone, index, cmd_bit)
+        except Exception as exc:
+            logger.error(f"do_command failed: {exc}")
+            return None
+
+    def move_phase(self, phase: int) -> dict | None:
+        """Move to a phase via managed ComMovePhase on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.move_phase(phase)
+        except Exception as exc:
+            logger.error(f"move_phase failed: {exc}")
+            return None
+
+    def cancel_command(self, decide: bool = True) -> dict | None:
+        """Cancel/pass via managed ComCancelCommand on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.cancel_command(decide)
+        except Exception as exc:
+            logger.error(f"cancel_command failed: {exc}")
+            return None
+
+    def dialog_set_result(self, result: int) -> dict | None:
+        """Submit dialog result (yes/no, position, etc.) on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.dialog_set_result(result)
+        except Exception as exc:
+            logger.error(f"dialog_set_result failed: {exc}")
+            return None
+
+    def list_send_index(self, index: int) -> dict | None:
+        """Select an item from a list on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.list_send_index(index)
+        except Exception as exc:
+            logger.error(f"list_send_index failed: {exc}")
+            return None
+
+    def get_input_state(self) -> dict | None:
+        """Get current engine input/dialog/list state."""
+        if not self._api:
+            return None
+        try:
+            return self._api.get_input_state()
+        except Exception as exc:
+            logger.error(f"get_input_state failed: {exc}")
+            return None
+
+    def default_location(self) -> dict | None:
+        """Auto-select default zone location on main thread."""
+        if not self._api:
+            return None
+        try:
+            return self._api.default_location()
+        except Exception as exc:
+            logger.error(f"default_location failed: {exc}")
+            return None
+
+    # ── AI vs AI: hook-based auto-play ──
+
+    def hook_autoplay(self, enable: bool) -> dict | None:
+        """Enable/disable AI auto-play by hooking DLL_DuelSetPlayerType in duel.dll."""
+        if not self._api:
+            return None
+        try:
+            return self._api.hook_autoplay(enable)
+        except Exception as exc:
+            logger.error(f"hook_autoplay failed: {exc}")
+            return None
+
+    def is_player_human(self, player: int) -> dict | None:
+        """Check if player is Human (type 0) or CPU (type 1)."""
+        if not self._api:
+            return None
+        try:
+            return self._api.is_player_human(player)
+        except Exception as exc:
+            logger.error(f"is_player_human failed: {exc}")
+            return None
+
+    # ── Direct native call methods (like CE scripts do) ──
+
+    def native_move_phase(self, phase: int) -> dict | None:
+        """Move phase via direct native function call."""
+        if not self._api:
+            return None
+        try:
+            return self._api.native_move_phase(phase)
+        except Exception as exc:
+            logger.error(f"native_move_phase failed: {exc}")
+            return None
+
+    def native_do_command(
+        self, player: int, zone: int, index: int, cmd_bit: int, check: bool = True
+    ) -> dict | None:
+        """Execute command via direct native function call."""
+        if not self._api:
+            return None
+        try:
+            return self._api.native_do_command(player, zone, index, cmd_bit, check)
+        except Exception as exc:
+            logger.error(f"native_do_command failed: {exc}")
+            return None
+
+    def native_cancel_command(self, decide: bool = True) -> dict | None:
+        """Cancel/pass via direct native function call."""
+        if not self._api:
+            return None
+        try:
+            return self._api.native_cancel_command(decide)
+        except Exception as exc:
+            logger.error(f"native_cancel_command failed: {exc}")
+            return None
+
+    def hook_reveal(self, enable: bool = True) -> bool:
+        """Install/remove Interceptor hooks so rival's hidden cards show face-up in-game."""
+        if not self._api:
+            return False
+        try:
+            result = self._api.hookreveal(enable)
+            return result.get("success", False)
+        except Exception as exc:
+            logger.error(f"hook_reveal failed: {exc}")
+            return False
+
+    def reveal_cards(self) -> dict | None:
+        """Get opponent's hand cards and face-down cards."""
+        if not self._api:
+            return None
+        try:
+            result = self._api.reveal()
+            if "error" in result:
+                return None
+            return result
+        except Exception:
+            return None
+
+    def zone_scan(self) -> dict | None:
+        """Full zone scan: brute-force all zone values for both players."""
+        if not self._api:
+            return None
+        try:
+            return self._api.zonescan()
+        except Exception as exc:
+            logger.error(f"zone_scan failed: {exc}")
+            return None
 
     def advance_duel_end(self) -> bool:
         """Set DuelEndMessage.IsNextButtonClicked = true to auto-advance win screen."""

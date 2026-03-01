@@ -9,7 +9,7 @@ from datetime import datetime
 class TuiLogBuffer:
     """Ring buffer that stores recent log entries for the dashboard."""
 
-    def __init__(self, maxlen: int = 15) -> None:
+    def __init__(self, maxlen: int = 30) -> None:
         self._buf: collections.deque[tuple[str, str, str]] = collections.deque(maxlen=maxlen)
 
     def append(self, tag: str, msg: str) -> None:
