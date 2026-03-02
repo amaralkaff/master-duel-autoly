@@ -18,6 +18,7 @@ from config import (
     HOTKEY_ASSIST,
     HOTKEY_WIN_NOW,
     HOTKEY_SPEED,
+    SPEED_SCALE,
     SCAN_INTERVAL,
 )
 from memory.frida_il2cpp import FridaIL2CPP
@@ -141,9 +142,9 @@ def main() -> None:
 
     def on_toggle_speed():
         new = state.toggle_speed_hack()
-        scale = 3.0 if new else 1.0
+        scale = SPEED_SCALE if new else 1.0
         frida_session.set_time_scale(scale)
-        logger.info(f"Speed Hack: {'ON (3x)' if new else 'OFF (1x)'}")
+        logger.info(f"Speed Hack: {'ON' if new else 'OFF'}")
 
     def on_win_now():
         logger.info("One-shot instant win triggered!")

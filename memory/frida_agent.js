@@ -3699,37 +3699,6 @@ rpc.exports = {
             return getCardsInZone(player, zoneVal, label, activeMI);
         }
 
-        // ── DEBUG: log card counts for field zones ──
-        var _dbgCounts = [];
-        for (var _dz = 1; _dz <= 12; _dz++) {
-            var _cnt = callCardFn(activeMI.getCardNum, [boxInt32(myself), boxInt32(_dz)]);
-            if (_cnt > 0) _dbgCounts.push("z" + _dz + "=" + _cnt);
-        }
-        var _handCnt = callCardFn(activeMI.getCardNum, [boxInt32(myself), boxInt32(13)]);
-        _dbgCounts.push("hand=" + _handCnt);
-        send("fieldDebug: player=" + myself + " online=" + online + " method=" + (activeMI === _pvpCardMI ? "PVP" : "DLL") + " counts=[" + _dbgCounts.join(",") + "]");
-        // Also try with the OTHER method set for comparison
-        var _altMI = (activeMI === _pvpCardMI) ? _cardMI : _pvpCardMI;
-        if (_altMI) {
-            var _altCounts = [];
-            for (var _dz = 1; _dz <= 12; _dz++) {
-                var _cnt2 = callCardFn(_altMI.getCardNum, [boxInt32(myself), boxInt32(_dz)]);
-                if (_cnt2 > 0) _altCounts.push("z" + _dz + "=" + _cnt2);
-            }
-            var _altHand = callCardFn(_altMI.getCardNum, [boxInt32(myself), boxInt32(13)]);
-            _altCounts.push("hand=" + _altHand);
-            send("fieldDebug ALT: player=" + myself + " method=" + (_altMI === _pvpCardMI ? "PVP" : "DLL") + " counts=[" + _altCounts.join(",") + "]");
-            // Also try player index 0 if we're using player 1
-            if (myself === 1) {
-                var _p0Counts = [];
-                for (var _dz = 1; _dz <= 12; _dz++) {
-                    var _cnt3 = callCardFn(activeMI.getCardNum, [boxInt32(0), boxInt32(_dz)]);
-                    if (_cnt3 > 0) _p0Counts.push("z" + _dz + "=" + _cnt3);
-                }
-                send("fieldDebug p0: method=" + (activeMI === _pvpCardMI ? "PVP" : "DLL") + " counts=[" + _p0Counts.join(",") + "]");
-            }
-        }
-
         // ── MY side ──
         var myHand = zoneCards(myself, ZONE_HAND, "H");
 

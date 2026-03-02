@@ -27,6 +27,9 @@ HOTKEY_WIN_NOW = "F5"
 HOTKEY_SPEED = "F6"
 STOP_HOTKEY = "F12"
 
+# Speed hack
+SPEED_SCALE = 3.0
+
 # Gemini AI (set GEMINI_API_KEY env var or create .env file)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")

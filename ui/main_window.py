@@ -111,7 +111,8 @@ class SettingsDialog(QDialog):
         model_row = QHBoxLayout()
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
-        current_model = advisor.model if advisor else os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+        from config import GEMINI_MODEL
+        current_model = advisor.model if advisor else GEMINI_MODEL
         self._model_combo.addItem(current_model)
         self._model_combo.setCurrentText(current_model)
         model_row.addWidget(self._model_combo)
@@ -201,24 +202,28 @@ class SettingsDialog(QDialog):
         self._lbl_status.setText(f"Status: {len(models)} models loaded")
         self._lbl_status.setStyleSheet("color: #a6e3a1; font-size: 12px;")
 
+    @staticmethod
+    def _read_env_filtered() -> list[str]:
+        """Read .env and return lines excluding Gemini keys."""
+        env = _env_path()
+        if not os.path.isfile(env):
+            return []
+        with open(env, "r", encoding="utf-8") as f:
+            return [
+                l for l in f.readlines()
+                if not l.startswith("GEMINI_API_KEY=") and not l.startswith("GEMINI_MODEL=")
+            ]
+
     def _save(self) -> None:
         key = self._key_input.text().strip() or self._existing_key
         model = self._model_combo.currentText().strip()
         if not key:
             return
-        # Write to .env
-        env = _env_path()
-        lines = []
-        if os.path.isfile(env):
-            with open(env, "r", encoding="utf-8") as f:
-                lines = [
-                    l for l in f.readlines()
-                    if not l.startswith("GEMINI_API_KEY=") and not l.startswith("GEMINI_MODEL=")
-                ]
+        lines = self._read_env_filtered()
         lines.append(f"GEMINI_API_KEY={key}\n")
         if model:
             lines.append(f"GEMINI_MODEL={model}\n")
-        with open(env, "w", encoding="utf-8") as f:
+        with open(_env_path(), "w", encoding="utf-8") as f:
             f.writelines(lines)
         # Apply at runtime
         if self._advisor:
@@ -230,15 +235,9 @@ class SettingsDialog(QDialog):
 
     def _clear_key(self) -> None:
         self._key_input.clear()
-        env = _env_path()
-        if os.path.isfile(env):
-            with open(env, "r", encoding="utf-8") as f:
-                lines = [
-                    l for l in f.readlines()
-                    if not l.startswith("GEMINI_API_KEY=") and not l.startswith("GEMINI_MODEL=")
-                ]
-            with open(env, "w", encoding="utf-8") as f:
-                f.writelines(lines)
+        lines = self._read_env_filtered()
+        with open(_env_path(), "w", encoding="utf-8") as f:
+            f.writelines(lines)
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GEMINI_MODEL", None)
         if self._advisor:
@@ -686,11 +685,16 @@ class MainWindow(QMainWindow):
             self.list_rival_field.clear()
             self.lbl_gy_deck.setText("")
 
-        # Sync buttons
-        self.btn_autopilot.setChecked(self.state.autopilot_enabled)
-        self.btn_instant_win.setChecked(self.state.instant_win_enabled)
-        self.btn_reveal.setChecked(self.state.reveal_enabled)
-        self.btn_speed.setChecked(self.state.speed_hack_enabled)
+        # Sync buttons (block signals to avoid re-triggering handlers)
+        for btn, val in [
+            (self.btn_autopilot, self.state.autopilot_enabled),
+            (self.btn_instant_win, self.state.instant_win_enabled),
+            (self.btn_reveal, self.state.reveal_enabled),
+            (self.btn_speed, self.state.speed_hack_enabled),
+        ]:
+            btn.blockSignals(True)
+            btn.setChecked(val)
+            btn.blockSignals(False)
 
         # Log
         lines = self.log_buf.get_lines()

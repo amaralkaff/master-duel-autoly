@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from bot.autopilot import DuelAutopilot
 from bot.gemini_advisor import GeminiAdvisor
+from config import SPEED_SCALE
 from memory.frida_il2cpp import FridaIL2CPP
 from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
@@ -85,9 +86,8 @@ def run_gui(
     def _toggle_speed(checked: bool) -> None:
         if state.speed_hack_enabled != checked:
             state.toggle_speed_hack()
-        scale = 3.0 if checked else 1.0
-        frida_session.set_time_scale(scale)
-        logger.info(f"Speed Hack: {'ON (3x)' if checked else 'OFF (1x)'}")
+        frida_session.set_time_scale(SPEED_SCALE if checked else 1.0)
+        logger.info(f"Speed Hack: {'ON' if checked else 'OFF'}")
 
     def _win_now() -> None:
         logger.info("One-shot instant win triggered!")
