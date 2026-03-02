@@ -2,7 +2,9 @@
 
 Bot for Yu-Gi-Oh! Master Duel. Hooks into the game via Frida + IL2CPP. Works on Solo and PvP.
 
-![screenshot](screenshot.png)
+![bot ui](screenshot_bot.png)
+
+![in-game](screenshot_game.png)
 
 ## Features
 
