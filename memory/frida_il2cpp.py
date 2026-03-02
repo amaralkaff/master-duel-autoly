@@ -1,5 +1,3 @@
-"""Frida session for Master Duel. Hooks IL2CPP to read/write game state."""
-
 from __future__ import annotations
 
 import os
@@ -92,7 +90,6 @@ class FridaIL2CPP:
         elif message.get("type") == "error":
             logger.error(f"Frida error: {message.get('description', message)}")
 
-    # duel state
 
     def is_duel_active(self) -> bool:
         if not self._api:
@@ -152,7 +149,6 @@ class FridaIL2CPP:
         logger.warn(f"LP write may have failed: {result}")
         return False
 
-    # solo API calls
 
     def call_api_with_result(self, method: str, arg: int | None = None) -> dict | None:
         if not self._api:
@@ -229,7 +225,6 @@ class FridaIL2CPP:
             logger.error(f"dismissAllDialogs RPC failed: {exc}")
             return False
 
-    # game state
 
     def get_game_state(self) -> dict | None:
         if not self._api:
@@ -279,7 +274,6 @@ class FridaIL2CPP:
         except Exception:
             return None
 
-    # managed command methods (run on Unity main thread)
 
     def do_command(self, player: int, zone: int, index: int, cmd_bit: int) -> dict | None:
         if not self._api:
@@ -344,7 +338,6 @@ class FridaIL2CPP:
             logger.error(f"default_location failed: {exc}")
             return None
 
-    # AI vs AI hook
 
     def hook_autoplay(self, enable: bool) -> dict | None:
         if not self._api:
@@ -364,7 +357,6 @@ class FridaIL2CPP:
             logger.error(f"is_player_human failed: {exc}")
             return None
 
-    # native calls (like CE scripts)
 
     def native_move_phase(self, phase: int) -> dict | None:
         if not self._api:
@@ -391,27 +383,6 @@ class FridaIL2CPP:
             return self._api.native_cancel_command(decide)
         except Exception as exc:
             logger.error(f"native_cancel_command failed: {exc}")
-            return None
-
-    def hook_reveal(self, enable: bool = True) -> bool:
-        if not self._api:
-            return False
-        try:
-            result = self._api.hookreveal(enable)
-            return result.get("success", False)
-        except Exception as exc:
-            logger.error(f"hook_reveal failed: {exc}")
-            return False
-
-    def reveal_cards(self) -> dict | None:
-        if not self._api:
-            return None
-        try:
-            result = self._api.reveal()
-            if "error" in result:
-                return None
-            return result
-        except Exception:
             return None
 
     def zone_scan(self) -> dict | None:

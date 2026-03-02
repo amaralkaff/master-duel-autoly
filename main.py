@@ -12,7 +12,6 @@ from config import (
     STOP_HOTKEY,
     HOTKEY_INSTANT_WIN,
     HOTKEY_AUTOPILOT,
-    HOTKEY_REVEAL,
     HOTKEY_ASSIST,
     HOTKEY_WIN_NOW,
     HOTKEY_SPEED,
@@ -93,13 +92,6 @@ def main() -> None:
     autopilot = DuelAutopilot(frida_session)
     advisor = GeminiAdvisor()
 
-    if state.reveal_enabled:
-        if frida_session.hook_reveal(True):
-            logger.ok("In-game reveal hooks installed.")
-        else:
-            logger.warn("In-game reveal hooks failed (will still work in TUI).")
-
-    # hotkey callbacks
     def on_toggle_iw():
         new = state.toggle_instant_win()
         logger.info(f"Instant Win: {'ON' if new else 'OFF'}")
@@ -111,11 +103,6 @@ def main() -> None:
         else:
             autopilot.disable()
         logger.info(f"Autopilot: {'ON' if new else 'OFF'}")
-
-    def on_toggle_reveal():
-        new = state.toggle_reveal()
-        frida_session.hook_reveal(new)
-        logger.info(f"Reveal Cards: {'ON' if new else 'OFF'}")
 
     # gui sets this once the window is ready
     _assist_cb = [None]
@@ -144,7 +131,6 @@ def main() -> None:
 
     keyboard.add_hotkey(HOTKEY_INSTANT_WIN, on_toggle_iw, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_AUTOPILOT, on_toggle_autopilot, suppress=True, trigger_on_release=True)
-    keyboard.add_hotkey(HOTKEY_REVEAL, on_toggle_reveal, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_ASSIST, on_assist, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_WIN_NOW, on_win_now, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(HOTKEY_SPEED, on_toggle_speed, suppress=True, trigger_on_release=True)

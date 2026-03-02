@@ -1,5 +1,3 @@
-"""Rich-based live terminal dashboard for Master Duel Bot."""
-
 from __future__ import annotations
 
 from rich.live import Live
@@ -11,12 +9,11 @@ from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
 from config import (
     TUI_REFRESH_RATE, HOTKEY_INSTANT_WIN, HOTKEY_AUTOPILOT,
-    HOTKEY_REVEAL, HOTKEY_WIN_NOW, STOP_HOTKEY,
+    HOTKEY_WIN_NOW, STOP_HOTKEY,
 )
 
 
 class Dashboard:
-    """Live-updating terminal dashboard."""
 
     def __init__(
         self,
@@ -33,7 +30,6 @@ class Dashboard:
     def _build_layout(self) -> Panel:
         lines = Text()
 
-        # -- Status section --
         attached = self.frida.is_attached()
         dot_attach = "[green]@[/]" if attached else "[red]@[/]"
         lines.append_text(Text.from_markup(
@@ -47,7 +43,6 @@ class Dashboard:
             f"  Frida:  {dot_frida} {'Connected' if attached else 'Disconnected'}\n"
         ))
 
-        # -- Duel section --
         lines.append_text(Text.from_markup("\n  [bold]-- Duel --[/bold]\n"))
 
         duel_active = self.frida.is_duel_active() if attached else False
@@ -63,7 +58,6 @@ class Dashboard:
                 f"  Turn {gs.get('turnNum', '?')} | {phase_name} | {turn_who}'s turn\n"
             ))
 
-            # -- My Hand --
             my_hand = gs.get("myHand", [])
             lines.append_text(Text.from_markup(
                 f"\n  [bold]-- My Hand ({len(my_hand)}) --[/bold]\n"
@@ -77,7 +71,6 @@ class Dashboard:
             else:
                 lines.append_text(Text.from_markup("    [dim](empty)[/]\n"))
 
-            # -- My Field --
             my_field = gs.get("myField", {})
             my_mons = my_field.get("monsters", [])
             my_sp = my_field.get("spells", [])
@@ -101,7 +94,6 @@ class Dashboard:
             if total_field == 0:
                 lines.append_text(Text.from_markup("    [dim](empty)[/]\n"))
 
-            # -- Rival Field --
             r_field = gs.get("rivalField", {})
             r_mons = r_field.get("monsters", [])
             r_sp = r_field.get("spells", [])
@@ -125,7 +117,6 @@ class Dashboard:
             if r_total == 0:
                 lines.append_text(Text.from_markup("    [dim](empty)[/]\n"))
 
-            # -- GY summary --
             my_gy = gs.get("myGY", [])
             rival_gy = gs.get("rivalGY", [])
             lines.append_text(Text.from_markup(
@@ -142,7 +133,6 @@ class Dashboard:
                 f"{'...' if len(rival_gy) > 5 else ''}\n"
             ))
 
-            # -- Deck counts --
             lines.append_text(Text.from_markup(
                 f"  Deck: {gs.get('myDeckCount', '?')} | "
                 f"Extra: {gs.get('myExtraDeckCount', '?')} | "
@@ -153,7 +143,6 @@ class Dashboard:
             lines.append_text(Text.from_markup(f"  My LP:       --\n"))
             lines.append_text(Text.from_markup(f"  Rival LP:    --\n"))
 
-        # -- Features section --
         lines.append_text(Text.from_markup("\n  [bold]-- Features --[/bold]\n"))
         ap = self.state.autopilot_enabled
         ap_label = "[green]ON (AI)[/]" if ap else "[red]OFF[/]"
@@ -165,21 +154,13 @@ class Dashboard:
         lines.append_text(Text.from_markup(
             f"  \\[{HOTKEY_INSTANT_WIN}] Instant Win:  {iw_label}\n"
         ))
-        rv = self.state.reveal_enabled
-        rv_label = "[green]ON[/]" if rv else "[red]OFF[/]"
-        lines.append_text(Text.from_markup(
-            f"  \\[{HOTKEY_REVEAL}] Reveal Cards: {rv_label}\n"
-        ))
 
-        # -- Controls section --
         lines.append_text(Text.from_markup("\n  [bold]-- Controls --[/bold]\n"))
         lines.append_text(Text.from_markup(f"  {HOTKEY_AUTOPILOT}   Toggle autopilot\n"))
         lines.append_text(Text.from_markup(f"  {HOTKEY_INSTANT_WIN}   Toggle instant win\n"))
-        lines.append_text(Text.from_markup(f"  {HOTKEY_REVEAL}   Toggle reveal cards\n"))
         lines.append_text(Text.from_markup(f"  {HOTKEY_WIN_NOW}   Instant win NOW (one-shot)\n"))
         lines.append_text(Text.from_markup(f"  {STOP_HOTKEY}  Quit\n"))
 
-        # -- Log section --
         lines.append_text(Text.from_markup("\n  [bold]-- Log --[/bold]\n"))
         log_lines = self.log_buf.get_lines()
         if log_lines:
@@ -196,7 +177,6 @@ class Dashboard:
         )
 
     def run(self) -> None:
-        """Block main thread, refreshing the dashboard until stop is set."""
         interval = 1.0 / TUI_REFRESH_RATE
         with Live(self._build_layout(), refresh_per_second=TUI_REFRESH_RATE) as live:
             while not self.state.stop_event.is_set():
@@ -219,5 +199,4 @@ def _phase_name(phase: int) -> str:
 
 
 def _markup_safe(text: str) -> str:
-    """Escape rich markup characters in log text."""
     return text.replace("[", "\\[")

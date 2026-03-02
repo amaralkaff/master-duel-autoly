@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
 from datetime import datetime
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import QPointF, QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -31,6 +32,31 @@ from ui.bot_state import BotState
 from ui.log_handler import TuiLogBuffer
 
 _PHASE_NAMES = {0: "Draw", 1: "Standby", 2: "Main1", 3: "Battle", 4: "Main2", 5: "End"}
+
+
+def _gear_icon(size=16, color="#a6adc8"):
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    cx, cy = size / 2, size / 2
+    r_out = size / 2 - 1.5
+    r_in = r_out * 0.65
+    teeth = 8
+    path = QPainterPath()
+    for i in range(teeth * 2):
+        angle = 2 * math.pi * i / (teeth * 2) - math.pi / 2
+        r = r_out if i % 2 == 0 else r_in
+        path.lineTo(cx + r * math.cos(angle), cy + r * math.sin(angle)) if i else path.moveTo(cx + r * math.cos(angle), cy + r * math.sin(angle))
+    path.closeSubpath()
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    p.drawPath(path)
+    p.setBrush(QColor("#313244"))
+    p.drawEllipse(QPointF(cx, cy), size * 0.15, size * 0.15)
+    p.end()
+    return QIcon(pm)
+
 
 DARK_STYLE = """
 QMainWindow, QWidget { background: #1e1e2e; color: #cdd6f4; }
@@ -256,7 +282,6 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(6, 6, 6, 6)
 
-        # left side: duel info, cards, buttons, log
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setSpacing(6)
@@ -314,14 +339,11 @@ class MainWindow(QMainWindow):
         self.btn_autopilot.setCheckable(True)
         self.btn_instant_win = QPushButton("Instant Win [F1]")
         self.btn_instant_win.setCheckable(True)
-        self.btn_reveal = QPushButton("Reveal [F3]")
-        self.btn_reveal.setCheckable(True)
         self.btn_win_now = QPushButton("Win Now [F5]")
         self.btn_speed = QPushButton("Speed [F6]")
         self.btn_speed.setCheckable(True)
         feat_lay.addWidget(self.btn_autopilot)
         feat_lay.addWidget(self.btn_instant_win)
-        feat_lay.addWidget(self.btn_reveal)
         feat_lay.addWidget(self.btn_win_now)
         feat_lay.addWidget(self.btn_speed)
         left_layout.addWidget(feat_box)
@@ -338,7 +360,6 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.log_view)
         left_layout.addWidget(log_box)
 
-        # right side: AI advisor chat
         right = QWidget()
         right.setStyleSheet("background: #11111b;")
         right_layout = QVBoxLayout(right)
@@ -371,12 +392,13 @@ class MainWindow(QMainWindow):
         header_lay.addLayout(title_col)
         header_lay.addStretch()
 
-        self.btn_settings = QPushButton("\u2699")
+        self.btn_settings = QPushButton()
+        self.btn_settings.setIcon(_gear_icon(16))
         self.btn_settings.setFixedSize(28, 26)
         self.btn_settings.setCursor(Qt.PointingHandCursor)
         self.btn_settings.setStyleSheet(
-            "QPushButton { background: #313244; color: #a6adc8; border: 1px solid #45475a; "
-            "border-radius: 4px; font-size: 15px; padding: 0; }"
+            "QPushButton { background: #313244; border: 1px solid #45475a; "
+            "border-radius: 4px; padding: 0; }"
             "QPushButton:hover { background: #45475a; }"
         )
         header_lay.addWidget(self.btn_settings)
@@ -634,7 +656,6 @@ class MainWindow(QMainWindow):
         for btn, val in [
             (self.btn_autopilot, self.state.autopilot_enabled),
             (self.btn_instant_win, self.state.instant_win_enabled),
-            (self.btn_reveal, self.state.reveal_enabled),
             (self.btn_speed, self.state.speed_hack_enabled),
         ]:
             btn.blockSignals(True)

@@ -8,7 +8,6 @@ Bot for Yu-Gi-Oh! Master Duel. Hooks into the game via Frida + IL2CPP. Works on 
 
 - **AI Advisor** - asks Gemini what to do based on your hand, field, GY, and available commands. just press F4 mid-duel
 - **Instant Win** - sets rival LP to 0. F1 keeps it on every turn, F5 does it once
-- **Reveal** - shows opponent's hand and face-down cards
 - **Autopilot** - makes the game's built-in AI play for you (Solo only)
 - **Speed Hack** - runs the game at 3x speed so you don't fall asleep during animations
 
@@ -27,7 +26,7 @@ For AI advisor, get a free key from [Google AI Studio](https://aistudio.google.c
 
 ## Hotkeys
 
-F1 instant win (toggle), F2 autopilot, F3 reveal cards, F4 ask AI, F5 instant win (once), F6 speed hack, F12 quit.
+F1 instant win (toggle), F2 autopilot, F4 ask AI, F5 instant win (once), F6 speed hack, F12 quit.
 
 ## Build
 

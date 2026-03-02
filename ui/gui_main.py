@@ -41,12 +41,6 @@ def run_gui(
             state.toggle_instant_win()
         logger.info(f"Instant Win: {'ON' if checked else 'OFF'}")
 
-    def _toggle_reveal(checked: bool) -> None:
-        if state.reveal_enabled != checked:
-            state.toggle_reveal()
-        frida_session.hook_reveal(checked)
-        logger.info(f"Reveal Cards: {'ON' if checked else 'OFF'}")
-
     def _assist() -> None:
         if not advisor or not advisor.has_client:
             win.append_ai_advice("No API key configured. Click the gear icon to add your Gemini API key.", "system")
@@ -107,7 +101,6 @@ def run_gui(
 
     win.btn_autopilot.toggled.connect(_toggle_autopilot)
     win.btn_instant_win.toggled.connect(_toggle_instant_win)
-    win.btn_reveal.toggled.connect(_toggle_reveal)
     win.btn_speed.toggled.connect(_toggle_speed)
     win.btn_assist.clicked.connect(_assist)
     win.btn_win_now.clicked.connect(_win_now)
