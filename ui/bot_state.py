@@ -1,5 +1,3 @@
-"""Thread-safe shared state for the bot."""
-
 from __future__ import annotations
 
 import threading

@@ -1,9 +1,3 @@
-"""Duel Autopilot -- auto-plays Solo duels via CPU hook.
-
-Hooks DLL_DuelSetPlayerType to force CPU mode (game's built-in AI).
-Solo mode only -- PvP uses the F4 Assist advisor instead.
-"""
-
 from __future__ import annotations
 
 import time
@@ -13,7 +7,7 @@ from utils import logger
 
 
 class DuelAutopilot:
-    """Auto-plays Solo duels via CPU hook."""
+    """Hooks DLL_DuelSetPlayerType to force CPU mode (Solo only)."""
 
     def __init__(self, frida_session: FridaIL2CPP) -> None:
         self.frida = frida_session
@@ -26,7 +20,6 @@ class DuelAutopilot:
         return self._ai_active
 
     def enable(self) -> bool:
-        """Enable Solo AI auto-play (CPU hook)."""
         self._mode_detected = False
         self._ai_active = True
 
@@ -37,7 +30,6 @@ class DuelAutopilot:
         return True
 
     def _detect_and_set_mode(self) -> bool:
-        """Try to enable CPU hook. Returns True if successful."""
         result = self.frida.hook_autoplay(True)
         if result and result.get("success"):
             self._mode_detected = True
@@ -46,7 +38,6 @@ class DuelAutopilot:
         return False
 
     def disable(self) -> bool:
-        """Disable AI auto-play."""
         self._ai_active = False
         self._mode_detected = False
 
@@ -57,11 +48,10 @@ class DuelAutopilot:
         return False
 
     def tick(self) -> None:
-        """Periodic decision cycle."""
         if not self._ai_active:
             return
 
-        # Deferred mode detection (F2 pressed before duel started)
+        # keep retrying if F2 was pressed before a duel started
         if not self._mode_detected:
             now = time.time()
             if now - self._last_check < 1.0:
@@ -70,7 +60,7 @@ class DuelAutopilot:
             self._detect_and_set_mode()
             return
 
-        # Solo: hook handles everything, just periodic health check
+        # hook handles everything, just periodic health check
         now = time.time()
         if now - self._last_check < 5.0:
             return

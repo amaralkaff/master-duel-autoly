@@ -1,5 +1,3 @@
-"""GUI entry point -- creates QApplication and MainWindow."""
-
 from __future__ import annotations
 
 import sys
@@ -26,12 +24,9 @@ def run_gui(
     advisor: GeminiAdvisor | None = None,
     assist_cb_ref: list | None = None,
 ) -> None:
-    """Launch the PySide6 GUI (blocks until window is closed)."""
     app = QApplication(sys.argv)
-
     win = MainWindow(frida_session, hwnd, state, log_buf)
 
-    # ── Connect feature buttons ──
     def _toggle_autopilot(checked: bool) -> None:
         if state.autopilot_enabled != checked:
             state.toggle_autopilot()
@@ -67,7 +62,6 @@ def run_gui(
         def _query():
             try:
                 advice = advisor.analyze_board(frida_session)
-                # Remove loading indicator
                 if win._ai_messages and win._ai_messages[-1]["type"] == "loading":
                     win._ai_messages.pop()
                 if advice:
@@ -119,14 +113,13 @@ def run_gui(
     win.btn_win_now.clicked.connect(_win_now)
     win.btn_settings.clicked.connect(_open_settings)
 
-    # Register assist callback so F4 hotkey can trigger it
+    # gui sets the callback so F4 hotkey works before window exists
     if assist_cb_ref is not None:
         assist_cb_ref[0] = _assist
 
     win.show()
     app.exec()
 
-    # ── Clean shutdown after window closes ──
     state.stop_event.set()
     if autopilot.ai_active:
         autopilot.disable()

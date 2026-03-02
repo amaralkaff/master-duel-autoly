@@ -2,7 +2,15 @@
 
 Bot for Yu-Gi-Oh! Master Duel. Hooks into the game via Frida + IL2CPP. Works on Solo and PvP.
 
-What it does: AI duel advisor (Gemini), instant win, card reveal, autopilot (Solo), speed hack (3x).
+![screenshot](screenshot.png)
+
+## Features
+
+- **AI Advisor** - asks Gemini what to do based on your hand, field, GY, and available commands. just press F4 mid-duel
+- **Instant Win** - sets rival LP to 0. F1 keeps it on every turn, F5 does it once
+- **Reveal** - shows opponent's hand and face-down cards
+- **Autopilot** - makes the game's built-in AI play for you (Solo only)
+- **Speed Hack** - runs the game at 3x speed so you don't fall asleep during animations
 
 ## Setup
 

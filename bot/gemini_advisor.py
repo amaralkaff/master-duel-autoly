@@ -1,16 +1,9 @@
-"""Gemini AI advisor for duel strategy.
-
-Reads the full board state (hand, field, GY, banished, deck counts, LP)
-and provides strategic advice via the F4 Assist hotkey/button.
-"""
-
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import TYPE_CHECKING
-
-import os
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
 from utils import logger
@@ -18,7 +11,6 @@ from utils import logger
 if TYPE_CHECKING:
     from memory.frida_il2cpp import FridaIL2CPP
 
-# Action type names for readability
 ACTION_NAMES = {0x08: "Activate", 0x10: "Summon", 0x40: "SetMonster", 0x80: "SetSpell"}
 PHASE_NAMES = {0: "Draw", 1: "Standby", 2: "Main1", 3: "Battle", 4: "Main2", 5: "End"}
 
@@ -31,14 +23,13 @@ If opponent's turn: what to negate/chain.
 
 
 class GeminiAdvisor:
-    """Gemini-powered duel advisor. Reads board state and gives strategy tips."""
 
     def __init__(self) -> None:
         self._client = None
         self._types = None
         self._model = GEMINI_MODEL
         self._last_call = 0.0
-        self._min_interval = 2.0  # min seconds between API calls
+        self._min_interval = 2.0
         self._init_client()
 
     @property
@@ -50,7 +41,6 @@ class GeminiAdvisor:
         return self._model
 
     def set_api_key(self, key: str) -> bool:
-        """Update the API key at runtime and re-initialize the client."""
         os.environ["GEMINI_API_KEY"] = key
         self._client = None
         self._types = None
@@ -58,20 +48,17 @@ class GeminiAdvisor:
         return self.has_client
 
     def set_model(self, model: str) -> None:
-        """Change the model used for queries."""
         self._model = model
         os.environ["GEMINI_MODEL"] = model
         logger.info(f"Gemini model set to: {model}")
 
     def list_models(self) -> list[str]:
-        """Fetch available generateContent models from the API."""
         if not self._client:
             return []
         try:
             models = []
             for m in self._client.models.list():
                 if any(a == "generateContent" for a in (m.supported_actions or [])):
-                    # Strip "models/" prefix if present
                     name = m.name
                     if name.startswith("models/"):
                         name = name[7:]
@@ -96,7 +83,6 @@ class GeminiAdvisor:
             logger.error(f"Gemini init failed: {e}")
 
     def analyze_board(self, frida: FridaIL2CPP) -> str | None:
-        """Analyze the board and return strategic advice as plain text."""
         if not self._client or not self._types:
             return None
 
@@ -108,7 +94,6 @@ class GeminiAdvisor:
         if not board:
             return None
 
-        # Get available commands if in a duel
         cmd_result = frida.get_commands()
         commands = cmd_result.get("commands", []) if isinstance(cmd_result, dict) else []
         cmd_list = self._format_commands(commands) if commands else "  (none)"
@@ -143,16 +128,12 @@ class GeminiAdvisor:
             logger.error(f"Gemini advisor query failed: {e}")
             return None
 
-    # -- Internal helpers --
-
     def _get_board_state(self, frida: FridaIL2CPP) -> dict | None:
-        """Get board state with card descriptions for Gemini context."""
         gs = frida.get_game_state()
         if not gs:
             return None
 
         def card_detail(cards: list) -> list[dict]:
-            """Name + effect text for hand/field cards the AI needs to understand."""
             result = []
             for c in cards:
                 name = c.get("name") or f"id:{c.get('cardId', '?')}"
@@ -190,7 +171,6 @@ class GeminiAdvisor:
         }
 
     def _format_commands(self, commands: list[dict]) -> str:
-        """Format commands into readable list for Gemini."""
         lines = []
         for i, cmd in enumerate(commands):
             name = cmd.get("name") or f"Unknown(id={cmd.get('cardId', '?')})"

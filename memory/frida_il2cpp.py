@@ -1,9 +1,4 @@
-"""Frida-based IL2CPP manipulation for Master Duel.
-
-Attaches Frida to the game, finds the native duel engine's XOR-obfuscated
-LP storage via IL2CPP introspection + native disassembly, and provides
-instant-win by writing 0 to the opponent's LP.
-"""
+"""Frida session for Master Duel. Hooks IL2CPP to read/write game state."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ import frida
 from utils import logger
 from config import PROCESS_NAME
 
-# When bundled by PyInstaller, data files live under sys._MEIPASS
+# pyinstaller bundles data under sys._MEIPASS
 if getattr(sys, "frozen", False):
     _AGENT_PATH = os.path.join(sys._MEIPASS, "memory", "frida_agent.js")
 else:
@@ -22,7 +17,6 @@ else:
 
 
 class FridaIL2CPP:
-    """Manages a Frida session for LP manipulation."""
 
     def __init__(self) -> None:
         self._session: frida.core.Session | None = None
@@ -86,7 +80,6 @@ class FridaIL2CPP:
         return self._api is not None
 
     def reattach(self) -> bool:
-        """Detach and re-attach Frida if the script was destroyed."""
         logger.info("Frida: re-attaching...")
         self.detach()
         return self.attach()
@@ -99,7 +92,7 @@ class FridaIL2CPP:
         elif message.get("type") == "error":
             logger.error(f"Frida error: {message.get('description', message)}")
 
-    # ── Duel state ──
+    # duel state
 
     def is_duel_active(self) -> bool:
         if not self._api:
@@ -122,7 +115,6 @@ class FridaIL2CPP:
             return None
 
     def diag_pvp(self) -> dict | None:
-        """Diagnostic: check Engine state and enumerate PVP_/THREAD_ methods."""
         if not self._api:
             return None
         try:
@@ -132,7 +124,7 @@ class FridaIL2CPP:
             return None
 
     def instant_win(self) -> bool:
-        """Write 0 to opponent LP in XOR-obfuscated native memory."""
+        """Write 0 to opponent LP via XOR-obfuscated native memory."""
         if not self._api:
             logger.error("Frida: not attached.")
             return False
@@ -160,10 +152,9 @@ class FridaIL2CPP:
         logger.warn(f"LP write may have failed: {result}")
         return False
 
-    # ── Solo API calls ──
+    # solo API calls
 
     def call_api_with_result(self, method: str, arg: int | None = None) -> dict | None:
-        """Call a Network API method and return success + GetParam data."""
         if not self._api:
             logger.error("Frida: not attached.")
             return None
@@ -173,22 +164,17 @@ class FridaIL2CPP:
             logger.error(f"call_api_with_result({method}) failed: {exc}")
             return None
 
-    def call_solo_api_fire_and_forget(
-        self, method: str, arg: int | None = None
-    ) -> dict | None:
-        """Call a Network API method without polling the Handle."""
+    def call_solo_api_fire_and_forget(self, method: str, arg: int | None = None) -> dict | None:
         if not self._api:
             logger.error("Frida: not attached.")
             return None
         try:
-            result = self._api.call_api_fire_and_forget(method, arg)
-            return result
+            return self._api.call_api_fire_and_forget(method, arg)
         except Exception as exc:
             logger.error(f"call_api_fire_and_forget({method}) failed: {exc}")
             return None
 
     def call_api_two_args(self, method: str, arg1: int, arg2: int) -> dict | None:
-        """Call a Network API method with 2 int args."""
         if not self._api:
             return None
         try:
@@ -197,10 +183,7 @@ class FridaIL2CPP:
             logger.error(f"call_api_two_args({method}) failed: {exc}")
             return None
 
-    # ── Solo bot methods ──
-
     def set_time_scale(self, scale: float) -> bool:
-        """Set UnityEngine.Time.timeScale. 1.0=normal, 10.0=10x speed."""
         if not self._api:
             return False
         try:
@@ -211,59 +194,44 @@ class FridaIL2CPP:
             return False
 
     def clean_vc_stack(self) -> bool:
-        """Remove stuck VCs from the VC stack."""
         if not self._api:
             return False
         try:
             result = self._api.clean_vc_stack()
             if result.get("success"):
-                logger.ok(
-                    f"VC stack cleaned: {result.get('action')} "
-                    f"(topVC={result.get('topVC')})"
-                )
+                logger.ok(f"VC stack cleaned: {result.get('action')} (topVC={result.get('topVC')})")
                 return True
             logger.warn(f"cleanVcStack: {result.get('error', 'failed')}")
-            if result.get("vcmMethods"):
-                logger.debug(f"VCM methods: {result['vcmMethods']}")
-            if result.get("cvcmMethods"):
-                logger.debug(f"CVCM methods: {result['cvcmMethods']}")
-            if result.get("vcmFields"):
-                logger.debug(f"VCM fields: {result['vcmFields']}")
             return False
         except Exception as exc:
             logger.error(f"cleanVcStack RPC failed: {exc}")
             return False
 
     def force_reboot(self) -> bool:
-        """Trigger game reboot via CVCM.PrepareReboot + ExecuteReboot."""
         if not self._api:
             return False
         try:
             result = self._api.force_reboot()
             return result.get("success", False)
         except Exception:
-            return True  # Assume reboot triggered if we lost connection
+            return True  # assume reboot triggered if we lost connection
 
     def dismiss_all_dialogs(self) -> bool:
-        """Dismiss all error dialogs and stuck VCs."""
         if not self._api:
             return False
         try:
             result = self._api.dismiss_all_dialogs()
             if result.get("success"):
-                actions = result.get("actions", [])
-                logger.info(f"Dismissed: {actions}")
+                logger.info(f"Dismissed: {result.get('actions', [])}")
                 return True
-            logger.debug(f"dismissAllDialogs: {result.get('error', 'nothing to dismiss')}")
             return False
         except Exception as exc:
             logger.error(f"dismissAllDialogs RPC failed: {exc}")
             return False
 
-    # ── Game state & engine enumeration ──
+    # game state
 
     def get_game_state(self) -> dict | None:
-        """Get complete game state snapshot (hand, field, GY, LP, phase, turn)."""
         if not self._api:
             return None
         try:
@@ -277,7 +245,6 @@ class FridaIL2CPP:
             return None
 
     def enum_engine(self, prefix: str = "DLL_DuelCom") -> dict | None:
-        """Enumerate Engine methods, filtering by prefix (default: DLL_DuelCom*)."""
         if not self._api:
             return None
         try:
@@ -291,7 +258,6 @@ class FridaIL2CPP:
             return None
 
     def call_engine(self, method_name: str, args: list[int] | None = None) -> dict | None:
-        """Call any Engine method by name with int args."""
         if not self._api:
             return None
         try:
@@ -303,7 +269,6 @@ class FridaIL2CPP:
             return None
 
     def get_commands(self) -> dict | None:
-        """Get available player commands in current duel state."""
         if not self._api:
             return None
         try:
@@ -314,10 +279,9 @@ class FridaIL2CPP:
         except Exception:
             return None
 
-    # ── Managed command methods (run on Unity main thread) ──
+    # managed command methods (run on Unity main thread)
 
     def do_command(self, player: int, zone: int, index: int, cmd_bit: int) -> dict | None:
-        """Execute a command via managed ComDoCommand on main thread."""
         if not self._api:
             return None
         try:
@@ -327,7 +291,6 @@ class FridaIL2CPP:
             return None
 
     def move_phase(self, phase: int) -> dict | None:
-        """Move to a phase via managed ComMovePhase on main thread."""
         if not self._api:
             return None
         try:
@@ -337,7 +300,6 @@ class FridaIL2CPP:
             return None
 
     def cancel_command(self, decide: bool = True) -> dict | None:
-        """Cancel/pass via managed ComCancelCommand on main thread."""
         if not self._api:
             return None
         try:
@@ -347,7 +309,6 @@ class FridaIL2CPP:
             return None
 
     def dialog_set_result(self, result: int) -> dict | None:
-        """Submit dialog result (yes/no, position, etc.) on main thread."""
         if not self._api:
             return None
         try:
@@ -357,7 +318,6 @@ class FridaIL2CPP:
             return None
 
     def list_send_index(self, index: int) -> dict | None:
-        """Select an item from a list on main thread."""
         if not self._api:
             return None
         try:
@@ -367,7 +327,6 @@ class FridaIL2CPP:
             return None
 
     def get_input_state(self) -> dict | None:
-        """Get current engine input/dialog/list state."""
         if not self._api:
             return None
         try:
@@ -377,7 +336,6 @@ class FridaIL2CPP:
             return None
 
     def default_location(self) -> dict | None:
-        """Auto-select default zone location on main thread."""
         if not self._api:
             return None
         try:
@@ -386,10 +344,9 @@ class FridaIL2CPP:
             logger.error(f"default_location failed: {exc}")
             return None
 
-    # ── AI vs AI: hook-based auto-play ──
+    # AI vs AI hook
 
     def hook_autoplay(self, enable: bool) -> dict | None:
-        """Enable/disable AI auto-play by hooking DLL_DuelSetPlayerType in duel.dll."""
         if not self._api:
             return None
         try:
@@ -399,7 +356,6 @@ class FridaIL2CPP:
             return None
 
     def is_player_human(self, player: int) -> dict | None:
-        """Check if player is Human (type 0) or CPU (type 1)."""
         if not self._api:
             return None
         try:
@@ -408,10 +364,9 @@ class FridaIL2CPP:
             logger.error(f"is_player_human failed: {exc}")
             return None
 
-    # ── Direct native call methods (like CE scripts do) ──
+    # native calls (like CE scripts)
 
     def native_move_phase(self, phase: int) -> dict | None:
-        """Move phase via direct native function call."""
         if not self._api:
             return None
         try:
@@ -420,10 +375,7 @@ class FridaIL2CPP:
             logger.error(f"native_move_phase failed: {exc}")
             return None
 
-    def native_do_command(
-        self, player: int, zone: int, index: int, cmd_bit: int, check: bool = True
-    ) -> dict | None:
-        """Execute command via direct native function call."""
+    def native_do_command(self, player: int, zone: int, index: int, cmd_bit: int, check: bool = True) -> dict | None:
         if not self._api:
             return None
         try:
@@ -433,7 +385,6 @@ class FridaIL2CPP:
             return None
 
     def native_cancel_command(self, decide: bool = True) -> dict | None:
-        """Cancel/pass via direct native function call."""
         if not self._api:
             return None
         try:
@@ -443,7 +394,6 @@ class FridaIL2CPP:
             return None
 
     def hook_reveal(self, enable: bool = True) -> bool:
-        """Install/remove Interceptor hooks so rival's hidden cards show face-up in-game."""
         if not self._api:
             return False
         try:
@@ -454,7 +404,6 @@ class FridaIL2CPP:
             return False
 
     def reveal_cards(self) -> dict | None:
-        """Get opponent's hand cards and face-down cards."""
         if not self._api:
             return None
         try:
@@ -466,7 +415,6 @@ class FridaIL2CPP:
             return None
 
     def zone_scan(self) -> dict | None:
-        """Full zone scan: brute-force all zone values for both players."""
         if not self._api:
             return None
         try:
@@ -476,7 +424,6 @@ class FridaIL2CPP:
             return None
 
     def advance_duel_end(self) -> bool:
-        """Set DuelEndMessage.IsNextButtonClicked = true to auto-advance win screen."""
         if not self._api:
             return False
         try:
@@ -486,14 +433,12 @@ class FridaIL2CPP:
             return False
 
     def hook_result_screens(self) -> bool:
-        """Install Interceptor hooks to auto-dismiss result/clear screens."""
         if not self._api:
             return False
         try:
             result = self._api.hook_result_screens()
             if result.get("success"):
-                hooked = result.get("hooked", [])
-                logger.info(f"Result screen hooks installed: {hooked}")
+                logger.info(f"Result screen hooks installed: {result.get('hooked', [])}")
                 return True
             logger.error(f"hookResultScreens failed: {result.get('error')}")
             return False
@@ -501,12 +446,7 @@ class FridaIL2CPP:
             logger.error(f"hookResultScreens RPC failed: {exc}")
             return False
 
-    def retry_solo_duel(
-        self,
-        chapter_id: int,
-        is_rental: bool = True,
-    ) -> bool:
-        """Call SoloSelectChapterViewController.RetryDuel."""
+    def retry_solo_duel(self, chapter_id: int, is_rental: bool = True) -> bool:
         if not self._api:
             logger.error("Frida: not attached.")
             return False

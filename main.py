@@ -1,5 +1,3 @@
-"""Master Duel Bot -- TUI entry point with autopilot, instant win, reveal, AI assist."""
-
 from __future__ import annotations
 
 import sys
@@ -36,7 +34,6 @@ def bot_worker(
     state: BotState,
     autopilot: DuelAutopilot,
 ) -> None:
-    """Background thread: monitors duel state, runs autopilot or instant win."""
     while not state.stop_event.is_set():
         try:
             if not frida_session.is_attached():
@@ -47,7 +44,6 @@ def bot_worker(
                 state.stop_event.wait(SCAN_INTERVAL)
                 continue
 
-            # ── Autopilot mode (Solo only) ──
             if state.autopilot_enabled:
                 try:
                     autopilot.tick()
@@ -56,7 +52,6 @@ def bot_worker(
                 state.stop_event.wait(SCAN_INTERVAL)
                 continue
 
-            # ── Instant win mode ──
             if state.instant_win_enabled:
                 status = frida_session.get_duel_status()
                 if status:
@@ -75,16 +70,13 @@ def bot_worker(
 def main() -> None:
     colorama_init()
 
-    # -- Shared state --
     state = BotState()
     log_buf = TuiLogBuffer()
-
-    # Wire logger -> TUI log buffer
     logger.set_log_callback(log_buf.append)
 
     logger.info("Master Duel Bot starting...")
 
-    # -- Wait for game window --
+    # wait for the game to be running
     logger.info("Waiting for Master Duel window...")
     hwnd = find_window(WINDOW_TITLE)
     while hwnd is None:
@@ -92,27 +84,22 @@ def main() -> None:
         hwnd = find_window(WINDOW_TITLE)
     logger.ok(f"Found game window (HWND: {hex(hwnd)})")
 
-    # -- Wait for Frida attach --
     frida_session = FridaIL2CPP()
     while not frida_session.attach():
         logger.info("Waiting for masterduel.exe process...")
         time.sleep(3)
     logger.ok("Frida IL2CPP session ready.")
 
-    # -- Create autopilot (Solo only) --
     autopilot = DuelAutopilot(frida_session)
-
-    # -- Create Gemini advisor (F4 assist) --
     advisor = GeminiAdvisor()
 
-    # -- Install in-game reveal hooks (reveal_enabled=True by default) --
     if state.reveal_enabled:
         if frida_session.hook_reveal(True):
             logger.ok("In-game reveal hooks installed.")
         else:
             logger.warn("In-game reveal hooks failed (will still work in TUI).")
 
-    # -- Register hotkeys --
+    # hotkey callbacks
     def on_toggle_iw():
         new = state.toggle_instant_win()
         logger.info(f"Instant Win: {'ON' if new else 'OFF'}")
@@ -130,11 +117,10 @@ def main() -> None:
         frida_session.hook_reveal(new)
         logger.info(f"Reveal Cards: {'ON' if new else 'OFF'}")
 
-    # Assist callback — set by gui_main once window is ready
+    # gui sets this once the window is ready
     _assist_cb = [None]
 
     def on_assist():
-        """Ask Gemini for strategic advice (F4 hotkey)."""
         if _assist_cb[0]:
             _assist_cb[0]()
         else:
@@ -142,8 +128,7 @@ def main() -> None:
 
     def on_toggle_speed():
         new = state.toggle_speed_hack()
-        scale = SPEED_SCALE if new else 1.0
-        frida_session.set_time_scale(scale)
+        frida_session.set_time_scale(SPEED_SCALE if new else 1.0)
         logger.info(f"Speed Hack: {'ON' if new else 'OFF'}")
 
     def on_win_now():
@@ -165,15 +150,9 @@ def main() -> None:
     keyboard.add_hotkey(HOTKEY_SPEED, on_toggle_speed, suppress=True, trigger_on_release=True)
     keyboard.add_hotkey(STOP_HOTKEY, on_quit, suppress=True, trigger_on_release=True)
 
-    # -- Start worker thread --
-    worker = threading.Thread(
-        target=bot_worker,
-        args=(frida_session, state, autopilot),
-        daemon=True,
-    )
+    worker = threading.Thread(target=bot_worker, args=(frida_session, state, autopilot), daemon=True)
     worker.start()
 
-    # -- Start GUI (blocks main thread until window is closed) --
     logger.ok("GUI starting. Press F1/F2/F3/F4/F5/F6/F12.")
 
     try:

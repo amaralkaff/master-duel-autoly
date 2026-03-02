@@ -1,5 +1,3 @@
-"""PySide6 main window for Master Duel Bot."""
-
 from __future__ import annotations
 
 import os
@@ -52,14 +50,12 @@ QSplitter::handle { background: #45475a; width: 2px; }
 
 
 def _env_path() -> str:
-    """Return the .env file path (next to exe when frozen, else project root)."""
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), ".env")
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog for configuring the Gemini API key and model."""
 
     def __init__(self, parent=None, advisor=None) -> None:
         super().__init__(parent)
@@ -89,7 +85,6 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
         layout.setContentsMargins(20, 16, 20, 16)
 
-        # -- API Key --
         layout.addWidget(QLabel("Gemini API Key"))
         key_row = QHBoxLayout()
         self._key_input = QLineEdit()
@@ -106,7 +101,6 @@ class SettingsDialog(QDialog):
         key_row.addWidget(self._btn_toggle)
         layout.addLayout(key_row)
 
-        # -- Model selector --
         layout.addWidget(QLabel("Model"))
         model_row = QHBoxLayout()
         self._model_combo = QComboBox()
@@ -123,14 +117,12 @@ class SettingsDialog(QDialog):
         model_row.addWidget(self._btn_fetch)
         layout.addLayout(model_row)
 
-        # -- Status --
         self._lbl_status = QLabel()
         self._update_status()
         layout.addWidget(self._lbl_status)
 
         layout.addStretch()
 
-        # -- Buttons --
         btn_row = QHBoxLayout()
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_key)
@@ -164,9 +156,7 @@ class SettingsDialog(QDialog):
             self._lbl_status.setStyleSheet("color: #f38ba8; font-size: 12px;")
 
     def _fetch_models(self) -> None:
-        """Fetch available models from the Gemini API and populate the dropdown."""
         if not self._advisor or not self._advisor.has_client:
-            # Try initializing with the current key field first
             key = self._key_input.text().strip() or self._existing_key
             if key and self._advisor:
                 self._advisor.set_api_key(key)
@@ -192,7 +182,6 @@ class SettingsDialog(QDialog):
         current = self._model_combo.currentText()
         self._model_combo.clear()
         self._model_combo.addItems(models)
-        # Re-select the previously chosen model if it exists
         idx = self._model_combo.findText(current)
         if idx >= 0:
             self._model_combo.setCurrentIndex(idx)
@@ -204,7 +193,6 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _read_env_filtered() -> list[str]:
-        """Read .env and return lines excluding Gemini keys."""
         env = _env_path()
         if not os.path.isfile(env):
             return []
@@ -225,7 +213,6 @@ class SettingsDialog(QDialog):
             lines.append(f"GEMINI_MODEL={model}\n")
         with open(_env_path(), "w", encoding="utf-8") as f:
             f.writelines(lines)
-        # Apply at runtime
         if self._advisor:
             self._advisor.set_api_key(key)
             if model:
@@ -269,15 +256,12 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(6, 6, 6, 6)
 
-        # ════════════════════════════════════════════
-        # LEFT SIDE -- Duel info, cards, buttons, log
-        # ════════════════════════════════════════════
+        # left side: duel info, cards, buttons, log
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setSpacing(6)
         left_layout.setContentsMargins(0, 0, 4, 0)
 
-        # -- Status row --
         status_box = QGroupBox("Status")
         sl = QHBoxLayout(status_box)
         self.lbl_attach = QLabel()
@@ -289,7 +273,6 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.lbl_hwnd)
         left_layout.addWidget(status_box)
 
-        # -- Duel info --
         duel_box = QGroupBox("Duel")
         dl = QHBoxLayout(duel_box)
         self.lbl_my_lp = QLabel("My LP: --")
@@ -301,7 +284,6 @@ class MainWindow(QMainWindow):
         dl.addWidget(self.lbl_turn)
         left_layout.addWidget(duel_box)
 
-        # -- Hand + Field side-by-side --
         cards_row = QHBoxLayout()
         hand_box = QGroupBox("My Hand")
         hl = QVBoxLayout(hand_box)
@@ -316,19 +298,16 @@ class MainWindow(QMainWindow):
         cards_row.addWidget(field_box)
         left_layout.addLayout(cards_row)
 
-        # -- Rival field --
         rival_box = QGroupBox("Rival Field")
         rl = QVBoxLayout(rival_box)
         self.list_rival_field = QListWidget()
         rl.addWidget(self.list_rival_field)
         left_layout.addWidget(rival_box)
 
-        # -- GY / Deck summary --
         self.lbl_gy_deck = QLabel("")
         self.lbl_gy_deck.setFont(QFont("Consolas", 11))
         left_layout.addWidget(self.lbl_gy_deck)
 
-        # -- Feature buttons --
         feat_box = QGroupBox("Features")
         feat_lay = QHBoxLayout(feat_box)
         self.btn_autopilot = QPushButton("Autopilot [F2]")
@@ -347,7 +326,6 @@ class MainWindow(QMainWindow):
         feat_lay.addWidget(self.btn_speed)
         left_layout.addWidget(feat_box)
 
-        # -- Log viewer --
         log_box = QGroupBox("Log")
         ll = QVBoxLayout(log_box)
         self.log_view = QTextEdit()
@@ -360,21 +338,16 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.log_view)
         left_layout.addWidget(log_box)
 
-        # ════════════════════════════════════════════
-        # RIGHT SIDE -- AI Advisor (chat-style)
-        # ════════════════════════════════════════════
+        # right side: AI advisor chat
         right = QWidget()
         right.setStyleSheet("background: #11111b;")
         right_layout = QVBoxLayout(right)
         right_layout.setSpacing(0)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        # -- Header --
         header = QWidget()
         header.setFixedHeight(48)
-        header.setStyleSheet(
-            "background: #181825; border-bottom: 1px solid #313244;"
-        )
+        header.setStyleSheet("background: #181825; border-bottom: 1px solid #313244;")
         header_lay = QHBoxLayout(header)
         header_lay.setContentsMargins(12, 0, 12, 0)
 
@@ -420,7 +393,6 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(header)
 
-        # -- Chat area (scrollable) --
         self._chat_area = QTextEdit()
         self._chat_area.setReadOnly(True)
         self._chat_area.setStyleSheet(
@@ -433,7 +405,6 @@ class MainWindow(QMainWindow):
         self._chat_area.setHtml(self._welcome_html())
         right_layout.addWidget(self._chat_area)
 
-        # -- Ask button (bottom) --
         btn_bar = QWidget()
         btn_bar.setFixedHeight(56)
         btn_bar.setStyleSheet("background: #181825; border-top: 1px solid #313244;")
@@ -454,7 +425,6 @@ class MainWindow(QMainWindow):
         btn_bar_lay.addWidget(self.btn_assist)
         right_layout.addWidget(btn_bar)
 
-        # -- Splitter: left | right --
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -462,16 +432,12 @@ class MainWindow(QMainWindow):
         splitter.setHandleWidth(2)
         main_layout.addWidget(splitter)
 
-        # -- AI chat messages buffer --
         self._ai_messages: list[dict] = []
         self._ai_dirty = False
 
-        # -- Refresh timer (250ms) --
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(250)
-
-    # ── AI advisor methods ─────────────────────────────────────────
 
     @staticmethod
     def _welcome_html() -> str:
@@ -490,10 +456,6 @@ class MainWindow(QMainWindow):
         )
 
     def append_ai_advice(self, text: str, msg_type: str = "ai") -> None:
-        """Add a message to the AI advisor chat.
-
-        msg_type: "ai" for advice, "system" for status, "loading" for thinking indicator.
-        """
         ts = datetime.now().strftime("%H:%M:%S")
         self._ai_messages.append({"text": text, "type": msg_type, "time": ts})
         self._ai_dirty = True
@@ -505,27 +467,18 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _md_to_html(text: str) -> str:
-        """Convert basic markdown to HTML for the chat bubbles."""
-        # Escape HTML first
         text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-        # Fix unclosed markdown (truncated responses)
-        # Count ** pairs — if odd, append ** to close
+        # close unclosed markdown pairs
         if text.count("**") % 2 != 0:
             text += "**"
-        # Count single * (not part of **) — if odd, append *
         stripped_bold = re.sub(r'\*\*', '', text)
         if stripped_bold.count("*") % 2 != 0:
             text += "*"
 
-        # Bold: **text** or __text__
         text = re.sub(r'\*\*(.+?)\*\*', r'<b style="color:#89b4fa;">\1</b>', text)
         text = re.sub(r'__(.+?)__', r'<b style="color:#89b4fa;">\1</b>', text)
-
-        # Italic: *text* or _text_ (but not inside bold)
         text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
-
-        # Inline code: `text`
         text = re.sub(r'`(.+?)`', r'<code style="background:#313244; padding:1px 4px; border-radius:3px;">\1</code>', text)
 
         lines = text.split("\n")
@@ -535,7 +488,6 @@ class MainWindow(QMainWindow):
         for line in lines:
             stripped = line.strip()
 
-            # Numbered list: "1. item" or "1) item"
             m = re.match(r'^(\d+)[.)]\s+(.+)$', stripped)
             if m:
                 if not in_list:
@@ -547,7 +499,6 @@ class MainWindow(QMainWindow):
                 )
                 continue
 
-            # Bullet list: "- item" or "* item"
             m = re.match(r'^[-*]\s+(.+)$', stripped)
             if m:
                 if not in_list:
@@ -561,7 +512,6 @@ class MainWindow(QMainWindow):
 
             in_list = False
 
-            # Empty line = paragraph break
             if not stripped:
                 result.append('<div style="height:6px;"></div>')
             else:
@@ -570,7 +520,6 @@ class MainWindow(QMainWindow):
         return "".join(result)
 
     def _render_chat(self) -> None:
-        """Re-render the chat area from messages buffer."""
         if not self._ai_dirty:
             return
         self._ai_dirty = False
@@ -593,7 +542,7 @@ class MainWindow(QMainWindow):
                     f'<span style="color:#89b4fa; font-size:12px;">Analyzing board state...</span>'
                     f'</div>'
                 )
-            else:  # "ai"
+            else:
                 body = self._md_to_html(msg["text"])
                 html_parts.append(
                     f'<div style="margin:8px 0; padding:12px 16px; '
@@ -611,12 +560,9 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.End)
         self._chat_area.setTextCursor(cursor)
 
-    # ── Periodic refresh ──────────────────────────────────────────
-
     def _refresh(self) -> None:
         attached = self.frida.is_attached()
 
-        # Status
         dot = "\u2022"
         if attached:
             self.lbl_attach.setText(f'<span style="color:#a6e3a1">{dot}</span> Attached')
@@ -628,7 +574,6 @@ class MainWindow(QMainWindow):
         self.lbl_frida.setTextFormat(Qt.RichText)
         self.lbl_hwnd.setText(f"HWND {hex(self.hwnd)}")
 
-        # Duel data
         duel_active = self.frida.is_duel_active() if attached else False
         gs = self.frida.get_game_state() if (attached and duel_active) else None
 
@@ -685,7 +630,7 @@ class MainWindow(QMainWindow):
             self.list_rival_field.clear()
             self.lbl_gy_deck.setText("")
 
-        # Sync buttons (block signals to avoid re-triggering handlers)
+        # block signals so setChecked doesn't re-fire toggle handlers
         for btn, val in [
             (self.btn_autopilot, self.state.autopilot_enabled),
             (self.btn_instant_win, self.state.instant_win_enabled),
@@ -696,7 +641,6 @@ class MainWindow(QMainWindow):
             btn.setChecked(val)
             btn.blockSignals(False)
 
-        # Log
         lines = self.log_buf.get_lines()
         log_html = ""
         for line in lines:
@@ -719,7 +663,6 @@ class MainWindow(QMainWindow):
             cursor.movePosition(QTextCursor.End)
             self.log_view.setTextCursor(cursor)
 
-        # AI chat
         self._render_chat()
 
     def _fill_list(self, widget: QListWidget, items: list[str], group_title: str) -> None:
